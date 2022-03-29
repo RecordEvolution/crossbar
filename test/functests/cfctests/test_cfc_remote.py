@@ -1,6 +1,6 @@
 ###############################################################################
 #
-# Copyright (c) Crossbar.io Technologies GmbH. All rights reserved.
+# Copyright (c) Crossbar.io Technologies GmbH. Licensed under EUPLv1.2.
 #
 ###############################################################################
 
@@ -53,6 +53,8 @@ def _prepare(management_session, mrealm_id):
                     print(hl(result, bold=True))
             break
 
+
+# @pytest.mark.skip('FIXME: RuntimeError: Timeout waiting for crossbar to start')
 
 @inlineCallbacks
 def test_remote_container(cfx_master, cfx_edge1):

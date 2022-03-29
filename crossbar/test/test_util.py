@@ -1,6 +1,6 @@
 ##############################################################################
 #
-#                        Crossbar.io FX
+#                        Crossbar.io
 #     Copyright (C) Crossbar.io Technologies GmbH. All rights reserved.
 #
 ##############################################################################
@@ -26,7 +26,7 @@ def master_config():
     # filename = pkg_resources.resource_filename('crossbar', 'master/node/config.json')
 
     # "copied" built-in config for testing
-    filename = pkg_resources.resource_filename('crossbar', 'tests/test_config.json')
+    filename = pkg_resources.resource_filename('crossbar', 'test/test_config.json')
 
     with open(filename) as f:
         config = json.load(f)

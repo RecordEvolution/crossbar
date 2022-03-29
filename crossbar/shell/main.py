@@ -1,7 +1,7 @@
 ###############################################################################
 #
 # Crossbar.io Shell
-# Copyright (c) Crossbar.io Technologies GmbH. All rights reserved.
+# Copyright (c) Crossbar.io Technologies GmbH. Licensed under EUPLv1.2.
 #
 ###############################################################################
 
@@ -66,8 +66,9 @@ class Config(object):
     Command configuration object where we collect all the parameters,
     options etc for later processing.
     """
-    def __init__(self, app, profile, realm, role):
+    def __init__(self, app, dotdir, profile, realm, role):
         self.app = app
+        self.dotdir = dotdir
         self.profile = profile
         self.realm = realm
         self.role = role
@@ -75,14 +76,20 @@ class Config(object):
         self.resource = None
 
     def __str__(self):
-        return u'Config(resource_type={}, resource={})'.format(self.resource_type, self.resource)
+        return 'Config(resource_type={}, resource={})'.format(self.resource_type, self.resource)
 
 
-@click.group(help="Crossbar.io FX Command Line", invoke_without_command=True)
+@click.group(help="Crossbar.io Command Line", invoke_without_command=True)
+@click.option(
+    '--dotdir',
+    envvar='CBF_DOTDIR',
+    default=None,
+    help="Set the dot directory (with config and profile) to be used",
+)
 @click.option(
     '--profile',
     envvar='CBF_PROFILE',
-    default=u'default',
+    default='default',
     help="Set the profile to be used",
 )
 @click.option(
@@ -99,11 +106,11 @@ class Config(object):
 )
 @click.option('--debug', is_flag=True, help='Enable debug output')
 @click.pass_context
-def cli(ctx, profile, realm, role, debug):
+def cli(ctx, dotdir, profile, realm, role, debug):
     if debug:
         txaio.start_logging(level='info')
 
-    ctx.obj = Config(_app, profile, realm, role)
+    ctx.obj = Config(_app, dotdir, profile, realm, role)
 
     # Allowing a command group to specifiy a default subcommand can be done using
     # https://github.com/click-contrib/click-default-group
@@ -185,7 +192,7 @@ def cmd_version(ctx):
     platform_str = platform.platform(terse=True, aliased=True)
 
     click.echo()
-    click.echo(hl("  Crossbar.io FX Shell") + ' - Command line tool for Crossbar.io FX')
+    click.echo(hl("  Crossbar.io Shell") + ' - Command line tool for Crossbar.io')
     click.echo()
     click.echo('  {:<24}: {}'.format('Version', hl('{} (build {})'.format(__version__, __build__))))
     click.echo('  {:<24}: {}'.format('Platform', hl(platform_str)))
@@ -214,7 +221,7 @@ def cmd_init(ctx, yes):
     ctx.obj.app.run_context(ctx)
 
 
-@cli.command(name='auth', help='authenticate user with Crossbar.io FX')
+@cli.command(name='auth', help='authenticate user with Crossbar.io')
 @click.option(
     '--code',
     default=None,
@@ -373,11 +380,12 @@ def cmd_show_domain_license(ctx):
 
 @cmd_show.command(name='database', help='open and show embedded database details')
 @click.argument('dbpath')
+@click.option('--include-slots/--no-include-slots', default=False, type=bool, help='show database slots')
 @click.pass_context
-def cmd_show_database(ctx, dbpath):
+def cmd_show_database(ctx, dbpath, include_slots):
     exporter = Exporter(dbpath)
-    exporter.print_slots()
-    exporter.print_stats()
+    exporter.print_config()
+    exporter.print_stats(include_slots=include_slots)
 
 
 @cli.group(name='export', help='export resources')
@@ -390,7 +398,9 @@ def cmd_export(ctx):
 @click.argument('dbpath')
 @click.option('--filename')
 @click.option('--include-indexes/--no-include-indexes', default=False, type=bool, help='export index tables')
-@click.option('--include-schemata', type=str)
+@click.option('--include-schemata',
+              type=str,
+              help='list of schemata to export (meta, globalschema, mrealmschema, xbr, xbrmm, xbrnetwork)')
 @click.option('--exclude-tables', type=str)
 @click.option('--use-json/--no-use-json', default=False, type=bool)
 @click.option('--use-binary-hex-encoding/--no-use-binary-hex-encoding', default=False, type=bool)
@@ -1075,16 +1085,32 @@ def cmd_list_router_transports(ctx, node, worker):
               help='return application realm names instead of object IDs')
 @click.pass_context
 def cmd_list_arealms(ctx, names):
-    cmd = command.CmdListApplicationRealms(names=names)
+    cmd = command.CmdListARealms(names=names)
     ctx.obj.app.run_context(ctx, cmd)
 
 
-@cmd_list.command(name='roles', help='list (application client) roles')
+@cmd_list.command(name='arealm-roles', help='list roles associated with application realm')
 @click.argument('arealm')
 @click.option('--names/--no-names', default=False, type=bool, help='return role names instead of object IDs')
 @click.pass_context
-def cmd_list_roles(ctx, arealm, names):
-    cmd = command.CmdListRoles(arealm, names=names)
+def cmd_list_arealm_roles(ctx, arealm, names):
+    cmd = command.CmdListARealmRoles(arealm, names=names)
+    ctx.obj.app.run_context(ctx, cmd)
+
+
+@cmd_list.command(name='roles', help='list roles')
+@click.option('--names/--no-names', default=False, type=bool, help='return role names instead of object IDs')
+@click.pass_context
+def cmd_list_roles(ctx, names):
+    cmd = command.CmdListRoles(names=names)
+    ctx.obj.app.run_context(ctx, cmd)
+
+
+@cmd_list.command(name='role-permissions', help='list role permissions')
+@click.argument('role')
+@click.pass_context
+def cmd_list_role_permissions(ctx, role):
+    cmd = command.CmdListRolePermissions(role)
     ctx.obj.app.run_context(ctx, cmd)
 
 
@@ -1307,12 +1333,21 @@ def cmd_show_role(ctx, role):
     ctx.obj.app.run_context(ctx, cmd)
 
 
+@cmd_show.command(name='role-permission', help='show role permission')
+@click.argument('role')
+@click.argument('uri')
+@click.pass_context
+def cmd_show_role_permission(ctx, role, uri):
+    cmd = command.CmdShowRolePermission(role, uri)
+    ctx.obj.app.run_context(ctx, cmd)
+
+
 @cmd_show.command(name='arealm-role', help='show arealm-role association')
 @click.argument('arealm')
 @click.argument('role')
 @click.pass_context
 def cmd_show_arealm_role(ctx, arealm, role):
-    cmd = command.CmdShowApplicationRealmRole(arealm, role)
+    cmd = command.CmdShowARealmRole(arealm, role)
     ctx.obj.app.run_context(ctx, cmd)
 
 
@@ -1385,7 +1420,7 @@ def cmd_select(ctx):
 @click.argument('resource')
 @click.pass_context
 def cmd_select_node(ctx, resource):
-    _app.current_resource_type = u'node'
+    _app.current_resource_type = 'node'
     _app.current_resource = resource
     _app.print_selected()
 
@@ -1394,7 +1429,7 @@ def cmd_select_node(ctx, resource):
 @click.argument('resource')
 @click.pass_context
 def cmd_select_worker(ctx, resource):
-    _app.current_resource_type = u'worker'
+    _app.current_resource_type = 'worker'
     _app.current_resource = resource
     _app.print_selected()
 
@@ -1403,7 +1438,7 @@ def cmd_select_worker(ctx, resource):
 @click.argument('resource')
 @click.pass_context
 def cmd_select_transport(ctx, resource):
-    _app.current_resource_type = u'transport'
+    _app.current_resource_type = 'transport'
     _app.current_resource = resource
     _app.print_selected()
 
