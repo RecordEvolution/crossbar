@@ -1,7 +1,7 @@
 ###############################################################################
 #
 # Crossbar.io Master
-# Copyright (c) Crossbar.io Technologies GmbH. Licensed under EUPLv1.2.
+# Copyright (c) typedef int GmbH. Licensed under EUPLv1.2.
 #
 ###############################################################################
 
@@ -80,7 +80,8 @@ def check_controller_fabric_center(personality, config):
 
 
 def check_controller(personality, controller, ignore=[]):
-    res = checkconfig.check_controller(personality, controller, ['fabric-center', 'enable_docker'] + ignore)
+    res = checkconfig.check_controller(personality, controller,
+                                       ['fabric-center', 'enable_docker', 'blockchain', 'ipfs'] + ignore)
 
     if 'fabric-center' in controller:
         check_controller_fabric_center(personality, controller['fabric-center'])

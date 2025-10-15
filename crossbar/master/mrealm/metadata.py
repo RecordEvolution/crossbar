@@ -1,7 +1,7 @@
 ###############################################################################
 #
 # Crossbar.io Master
-# Copyright (c) Crossbar.io Technologies GmbH. Licensed under EUPLv1.2.
+# Copyright (c) typedef int GmbH. Licensed under EUPLv1.2.
 #
 ###############################################################################
 
@@ -9,6 +9,7 @@ import uuid
 from pprint import pformat
 
 import txaio
+
 txaio.use_twisted()
 from txaio import sleep, time_ns
 from twisted.internet.defer import inlineCallbacks
@@ -144,9 +145,9 @@ class MetadataManager(object):
 
         :return: Documentation object,
         """
-        assert type(otype) == str
+        assert isinstance(otype, str)
         assert otype in MetadataManager.otype_to_slot
-        assert type(oid) == str
+        assert isinstance(oid, str)
 
         slot = MetadataManager.otype_to_slot[otype]  # noqa
         try:
@@ -170,9 +171,9 @@ class MetadataManager(object):
         :param details:
         :return:
         """
-        assert type(otype) == str
+        assert isinstance(otype, str)
         assert otype in MetadataManager.otype_to_slot
-        assert type(oid) == str
+        assert isinstance(oid, str)
 
         slot = MetadataManager.otype_to_slot[otype]
         try:
@@ -219,7 +220,7 @@ class MetadataManager(object):
         :param details:
         :return:
         """
-        assert type(oid) == str
+        assert isinstance(oid, str)
 
         result = []
 

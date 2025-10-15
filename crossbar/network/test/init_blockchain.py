@@ -1,10 +1,11 @@
 # coding=utf8
-# XBR Network - Copyright (c) Crossbar.io Technologies GmbH. Licensed under EUPLv1.2.
+# XBR Network - Copyright (c) typedef int GmbH. Licensed under EUPLv1.2.
 
 import sys
 import argparse
 
 import txaio
+
 txaio.use_twisted()
 
 import web3

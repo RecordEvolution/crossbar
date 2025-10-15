@@ -1,7 +1,7 @@
 ###############################################################################
 #
 # Crossbar.io Master
-# Copyright (c) Crossbar.io Technologies GmbH. Licensed under EUPLv1.2.
+# Copyright (c) typedef int GmbH. Licensed under EUPLv1.2.
 #
 ###############################################################################
 
@@ -23,6 +23,7 @@ from cfxdb.mrealm import ApplicationRealm, ApplicationRealmRoleAssociation, Role
     WorkerGroupStatus, Principal, Credential, RouterWorkerGroupClusterPlacement, Node
 
 import txaio
+
 txaio.use_twisted()
 from txaio import time_ns, sleep, make_logger  # noqa
 from twisted.internet.defer import inlineCallbacks, returnValue
@@ -348,7 +349,9 @@ class ApplicationRealmMonitor(object):
                         "serializer": "cbor"
                     },
                     "auth": {
-                        "anonymous-proxy": {
+                        # must use cryptosign-proxy, NOT anonymous-proxy, since we run
+                        # over TCP, not UDS, and to IP addresses on different hosts
+                        "cryptosign-proxy": {
                             "type": "static"
                         }
                     }
@@ -587,7 +590,10 @@ class ApplicationRealmMonitor(object):
                     # III.2) if there isn't a transport started (with transport ID as we expect) already,
                     # start a new transport
                     if not transport:
+
+                        # FIXME: allow to configure transport type TCP vs UDS
                         USE_UDS = False
+
                         if USE_UDS:
                             # https://serverfault.com/a/641387/117074
                             UNIX_PATH_MAX = 108
@@ -603,7 +609,17 @@ class ApplicationRealmMonitor(object):
                                     'type': 'unix',
                                     'path': transport_path
                                 },
-                                'options': {}
+                                'options': {
+                                    # FIXME: must be >= max_message_size on proxy transport
+                                    # "max_message_size": 1048576
+                                },
+                                'serializers': ['cbor'],
+                                'auth': {
+                                    # use anonymous-proxy authentication for UDS based connections (on localhost only)
+                                    'anonymous-proxy': {
+                                        'type': 'static'
+                                    }
+                                }
                             }
                         else:
                             principals = {}
@@ -625,16 +641,15 @@ class ApplicationRealmMonitor(object):
                                     'portrange': [10000, 10100]
                                 },
                                 'options': {
-                                    "max_message_size": 1048576
+                                    # FIXME: must be >= max_message_size on proxy transport
+                                    # "max_message_size": 1048576
                                 },
                                 'serializers': ['cbor'],
                                 'auth': {
-                                    'cryptosign': {
+                                    # use cryptosign-proxy authentication for TCP based connections
+                                    'cryptosign-proxy': {
                                         'type': 'static',
                                         'principals': principals
-                                    },
-                                    'anonymous-proxy': {
-                                        'type': 'static'
                                     }
                                 }
                             }
@@ -1224,7 +1239,7 @@ class ApplicationRealmManager(object):
                  "workergroup_oid": "74ba0f88-eb7d-4810-a901-4a6d611d7519"}
 
         """
-        assert type(arealm_oid) == str
+        assert isinstance(arealm_oid, str)
         assert details is None or isinstance(details, CallDetails)
 
         self.log.info('{func}(arealm_oid={arealm_oid}, details={details})',
@@ -1257,7 +1272,7 @@ class ApplicationRealmManager(object):
 
         :return: Application realm definition.
         """
-        assert type(arealm_name) == str
+        assert isinstance(arealm_name, str)
         assert details is None or isinstance(details, CallDetails)
 
         self.log.info('{func}(arealm_name="{arealm_name}", details={details})',
@@ -1301,7 +1316,7 @@ class ApplicationRealmManager(object):
 
         :return: Application realm creation information.
         """
-        assert type(arealm) == dict
+        assert isinstance(arealm, dict)
         assert details is None or isinstance(details, CallDetails)
 
         self.log.info('{func}(arealm="{arealm}", details={details})',
@@ -1314,11 +1329,6 @@ class ApplicationRealmManager(object):
         # object ID of new application realm
         obj.oid = uuid.uuid4()
 
-        # unless and until the application realm is started, no router worker
-        # group or web cluster is assigned
-        obj.workergroup_oid = None
-        obj.webcluster_oid = None
-
         if details and details.caller_authid:
             with self.gdb.begin() as txn:
                 caller_oid = self.gschema.idx_users_by_email[txn, details.caller_authid]
@@ -1328,6 +1338,17 @@ class ApplicationRealmManager(object):
             obj.owner_oid = caller_oid
         else:
             raise ApplicationError('wamp.error.no_such_principal', 'cannot map user - no caller authid available')
+
+        # unless and until the application realm is started, no router worker
+        # group or web cluster is assigned
+        obj.workergroup_oid = None
+        obj.webcluster_oid = None
+
+        # if this arealm is federated, it is associated with a specific XBR datamarket
+        if obj.datamarket_oid:
+            # FIXME: check for datamarket_oid ..
+            self.log.info('new application realm is associated datamarket_oid {datamarket_oid}',
+                          datamarket_oid=hlid(obj.datamarket_oid))
 
         # set initial status of application realm
         obj.status = ApplicationRealm.STATUS_STOPPED
@@ -1376,7 +1397,7 @@ class ApplicationRealmManager(object):
         with self.db.begin(write=True) as txn:
             arealm = self.schema.arealms[txn, oid]
             if arealm:
-                if arealm.status != 'STOPPED':
+                if arealm.status != ApplicationRealm.STATUS_STOPPED:
                     raise ApplicationError(
                         'crossbar.error.not_stopped',
                         'application realm with oid {} found, but currently in status "{}"'.format(oid, arealm.status))
@@ -1577,7 +1598,7 @@ class ApplicationRealmManager(object):
 
         :return: Current status and statistics for given routercluster.
         """
-        assert type(arealm_oid) == str
+        assert isinstance(arealm_oid, str)
         assert details is None or isinstance(details, CallDetails)
 
         self.log.info('{func}(arealm_oid={arealm_oid}, details={details})',
@@ -1615,8 +1636,8 @@ class ApplicationRealmManager(object):
 
         :return: List of principal object IDs or names.
         """
-        assert type(arealm_oid) == str
-        assert return_names is None or type(return_names) == bool
+        assert isinstance(arealm_oid, str)
+        assert return_names is None or isinstance(return_names, bool)
         assert details is None or isinstance(details, CallDetails)
 
         self.log.info('{func}(arealm_oid={arealm_oid}, details={details})',
@@ -1733,7 +1754,7 @@ class ApplicationRealmManager(object):
 
         :return: Principal addition information.
         """
-        assert type(principal) == dict
+        assert isinstance(principal, dict)
         assert details is None or isinstance(details, CallDetails)
 
         self.log.info('{func}(arealm_oid="{arealm_oid}", principal={principal}, details={details})',
@@ -1748,7 +1769,7 @@ class ApplicationRealmManager(object):
             raise ApplicationError('wamp.error.invalid_argument', 'invalid oid "{}"'.format(arealm_oid))
 
         role_oid = principal.get('role_oid', None)
-        assert role_oid is not None and type(role_oid) == str
+        assert role_oid is not None and isinstance(role_oid, str)
         try:
             role_oid_ = uuid.UUID(role_oid)
         except:
@@ -1816,8 +1837,8 @@ class ApplicationRealmManager(object):
 
         :return: List of credential object IDs or names (WAMP authids).
         """
-        assert type(arealm_oid) == str
-        assert type(principal_oid) == str
+        assert isinstance(arealm_oid, str)
+        assert isinstance(principal_oid, str)
         assert details is None or isinstance(details, CallDetails)
 
         self.log.info('{func}(arealm_oid={arealm_oid}, principal_oid={principal_oid}, details={details})',
@@ -2067,7 +2088,7 @@ class ApplicationRealmManager(object):
 
         :return: Role definition.
         """
-        assert type(role_oid) == str
+        assert isinstance(role_oid, str)
         assert details is None or isinstance(details, CallDetails)
 
         self.log.info('{func}(role_oid={role_oid}, details={details})',
@@ -2097,7 +2118,7 @@ class ApplicationRealmManager(object):
 
         :return: Role definition.
         """
-        assert type(role_name) == str
+        assert isinstance(role_name, str)
         assert details is None or isinstance(details, CallDetails)
 
         self.log.info('{func}(role_name="{role_name}", details={details})',
@@ -2124,7 +2145,7 @@ class ApplicationRealmManager(object):
 
         :return: Role creation information.
         """
-        assert type(role) == dict
+        assert isinstance(role, dict)
         assert details is None or isinstance(details, CallDetails)
 
         self.log.info('{func}(role="{role}", details={details})',
@@ -2292,8 +2313,8 @@ class ApplicationRealmManager(object):
 
         :return: Permission removal information.
         """
-        assert type(role_oid) == str
-        assert type(permission_oid) == str
+        assert isinstance(role_oid, str)
+        assert isinstance(permission_oid, str)
         assert details is None or isinstance(details, CallDetails)
 
         try:
@@ -2337,8 +2358,8 @@ class ApplicationRealmManager(object):
 
         :return: Permission definition.
         """
-        assert type(role_oid) == str
-        assert type(permission_oid) == str
+        assert isinstance(role_oid, str)
+        assert isinstance(permission_oid, str)
         assert details is None or isinstance(details, CallDetails)
 
         try:
@@ -2491,6 +2512,11 @@ class ApplicationRealmManager(object):
                 raise ApplicationError('crossbar.error.no_such_object',
                                        'no application realm with oid {} found'.format(association.arealm_oid))
 
+            role = self.schema.roles[txn, association.role_oid]
+            if not role:
+                raise ApplicationError('crossbar.error.no_such_object',
+                                       'no role with oid {} found'.format(association.role_oid))
+
             self.schema.arealm_role_associations[txn, (association.arealm_oid, association.role_oid)] = association
 
         res_obj = association.marshal()
@@ -2510,9 +2536,15 @@ class ApplicationRealmManager(object):
 
         :return: Application realm role removal information.
         """
-        assert type(arealm_oid) == str
-        assert type(role_oid) == str
+        assert isinstance(arealm_oid, str)
+        assert isinstance(role_oid, str)
         assert details is None or isinstance(details, CallDetails)
+
+        self.log.info('{func}(arealm_oid={arealm_oid}, role_oid={role_oid}, details={details})',
+                      arealm_oid=hlid(arealm_oid),
+                      role_oid=hlid(role_oid),
+                      func=hltype(self.remove_arealm_role),
+                      details=details)
 
         try:
             arealm_oid_ = uuid.UUID(arealm_oid)
@@ -2524,24 +2556,23 @@ class ApplicationRealmManager(object):
         except Exception:
             raise ApplicationError('wamp.error.invalid_argument', 'invalid oid "{}"'.format(role_oid))
 
-        self.log.info('{func}(arealm_oid={arealm_oid}, role_oid={role_oid}, details={details})',
-                      arealm_oid=hlid(arealm_oid_),
-                      role_oid=hlid(role_oid_),
-                      func=hltype(self.remove_arealm_role),
-                      details=details)
-
         with self.db.begin(write=True) as txn:
             arealm = self.schema.arealms[txn, arealm_oid_]
             if not arealm:
                 raise ApplicationError('crossbar.error.no_such_object',
-                                       'no arealm with oid {} found'.format(arealm_oid))
+                                       'no arealm with oid {} found'.format(arealm_oid_))
 
             role = self.schema.roles[txn, role_oid_]
             if not role:
                 raise ApplicationError('crossbar.error.no_such_object', 'no role with oid {} found'.format(role_oid_))
 
-            arealm_role_association = self.schema.arealm_role_associations[txn, (arealm_oid, role_oid_)]
-            del self.schema.arealm_role_associations[txn, (arealm_oid, role_oid_)]
+            arealm_role_association = self.schema.arealm_role_associations[txn, (arealm_oid_, role_oid_)]
+            if not arealm_role_association:
+                raise ApplicationError(
+                    'crossbar.error.no_such_object',
+                    'no role association for (arealm_oid={}, role_oid={}) found'.format(arealm_oid_, role_oid_))
+
+            del self.schema.arealm_role_associations[txn, (arealm_oid_, role_oid_)]
 
         res_obj = arealm_role_association.marshal()
         self.log.info('role removed from arealm:\n{res_obj}', membership=res_obj)
@@ -2560,8 +2591,8 @@ class ApplicationRealmManager(object):
 
         :return: Application realm role association removal information.
         """
-        assert type(arealm_oid) == str
-        assert type(role_oid) == str
+        assert isinstance(arealm_oid, str)
+        assert isinstance(role_oid, str)
         assert details is None or isinstance(details, CallDetails)
 
         try:

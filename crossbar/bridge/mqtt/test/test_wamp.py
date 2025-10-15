@@ -1,6 +1,6 @@
 #####################################################################################
 #
-#  Copyright (c) Crossbar.io Technologies GmbH
+#  Copyright (c) typedef int GmbH
 #  SPDX-License-Identifier: EUPL-1.2
 #
 #####################################################################################
@@ -514,7 +514,7 @@ class MQTTAdapterTests(TestCase):
                     qos_level=0,
                     retain=True,
                     topic_name="com/test/wamp",
-                    payload=json.dumps({}, sort_keys=True).encode('utf8')).serialise())
+                    payload=json.dumps({}).encode('utf8')).serialise())
 
     def _test_lastwill(self):
         """

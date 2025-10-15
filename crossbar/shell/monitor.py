@@ -1,7 +1,7 @@
 ###############################################################################
 #
 # Crossbar.io Shell
-# Copyright (c) Crossbar.io Technologies GmbH. Licensed under EUPLv1.2.
+# Copyright (c) typedef int GmbH. Licensed under EUPLv1.2.
 #
 ###############################################################################
 
@@ -14,6 +14,7 @@ import numpy as np
 # from babel.dates import get_timezone
 
 import txaio
+
 txaio.use_twisted()
 
 from txaio import time_ns, sleep

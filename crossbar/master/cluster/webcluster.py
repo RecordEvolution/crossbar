@@ -1,7 +1,7 @@
 ###############################################################################
 #
 # Crossbar.io Master
-# Copyright (c) Crossbar.io Technologies GmbH. Licensed under EUPLv1.2.
+# Copyright (c) typedef int GmbH. Licensed under EUPLv1.2.
 #
 ###############################################################################
 
@@ -16,13 +16,14 @@ from autobahn.wamp.exception import ApplicationError
 from autobahn.wamp.types import CallDetails, PublishOptions, RegisterOptions
 
 from crossbar.common import checkconfig
-from crossbar.webservice import archive
+from crossbar.webservice import archive, wap
 from crossbar._util import hl, hlid, hltype, hlval, get_free_tcp_port
 from cfxdb.mrealm import WebCluster, WebClusterNodeMembership, WebService
 from cfxdb.mrealm import cluster
 from cfxdb.mrealm.application_realm import ApplicationRealmStatus
 
 import txaio
+
 txaio.use_twisted()
 from txaio import time_ns, sleep, make_logger  # noqa
 from twisted.internet.defer import inlineCallbacks
@@ -414,19 +415,26 @@ class WebClusterManager(object):
     # publication options for management API events
     _PUBOPTS = PublishOptions(acknowledge=True)
 
-    # map of allowed web services
+    # map of allowed web services, see also crossbar.personality.Personality.WEB_SERVICE_CHECKERS
     _WEB_SERVICE_CHECKERS = {
+        # none
         'path': checkconfig.check_web_path_service_path,
-        'static': checkconfig.check_web_path_service_static,
-        'archive': archive.RouterWebServiceArchive.check,
-        'json': checkconfig.check_web_path_service_json,
-        'nodeinfo': checkconfig.check_web_path_service_nodeinfo,
         'redirect': checkconfig.check_web_path_service_redirect,
+        # resource
         'reverseproxy': checkconfig.check_web_path_service_reverseproxy,
-        'websocket': checkconfig.check_web_path_service_websocket,
-        'websocket-reverseproxy': checkconfig.check_web_path_service_websocket_reverseproxy,
+        'nodeinfo': checkconfig.check_web_path_service_nodeinfo,
+        'json': checkconfig.check_web_path_service_json,
         'cgi': checkconfig.check_web_path_service_cgi,
         'wsgi': checkconfig.check_web_path_service_wsgi,
+        'static': checkconfig.check_web_path_service_static,
+        'websocket': checkconfig.check_web_path_service_websocket,
+        'websocket-reverseproxy': checkconfig.check_web_path_service_websocket_reverseproxy,
+        # longpoll
+        'caller': checkconfig.check_web_path_service_caller,
+        'publisher': checkconfig.check_web_path_service_publisher,
+        # webhook
+        'archive': archive.RouterWebServiceArchive.check,
+        'wap': wap.RouterWebServiceWap.check,
     }
 
     def __init__(self, session, globaldb, globalschema, db, schema, reactor=None):
@@ -661,7 +669,7 @@ class WebClusterManager(object):
                     "tls_key": null
                 }
         """
-        assert type(webcluster_oid) == str
+        assert isinstance(webcluster_oid, str)
         assert details is None or isinstance(details, CallDetails)
 
         self.log.info('{func}(webcluster_oid={webcluster_oid}, details={details})',
@@ -695,7 +703,7 @@ class WebClusterManager(object):
 
         :return: Web cluster definition.
         """
-        assert type(webcluster_name) == str
+        assert isinstance(webcluster_name, str)
         assert details is None or isinstance(details, CallDetails)
 
         self.log.info('{func}(webcluster_name="{webcluster_name}", details={details})',
@@ -794,7 +802,7 @@ class WebClusterManager(object):
                     "tls_key": null
                 }
         """
-        assert type(webcluster) == dict
+        assert isinstance(webcluster, dict)
         assert details is None or isinstance(details, CallDetails)
 
         self.log.info('{func}(webcluster="{webcluster}", details={details})',
@@ -1125,9 +1133,9 @@ class WebClusterManager(object):
                     "node4"
                 ]
         """
-        assert type(webcluster_oid) == str
-        assert return_names is None or type(return_names) == bool
-        assert filter_by_status is None or type(filter_by_status) == str
+        assert isinstance(webcluster_oid, str)
+        assert return_names is None or isinstance(return_names, bool)
+        assert filter_by_status is None or isinstance(filter_by_status, str)
         assert details is None or isinstance(details, CallDetails)
 
         self.log.info(
@@ -1272,8 +1280,8 @@ class WebClusterManager(object):
                     "standby": null
                 }
         """
-        assert type(webcluster_oid) == str
-        assert type(node_oid) == str
+        assert isinstance(webcluster_oid, str)
+        assert isinstance(node_oid, str)
         assert details is None or isinstance(details, CallDetails)
 
         try:
@@ -1340,8 +1348,8 @@ class WebClusterManager(object):
                     "standby": null
                 }
         """
-        assert type(webcluster_oid) == str
-        assert type(node_oid) == str
+        assert isinstance(webcluster_oid, str)
+        assert isinstance(node_oid, str)
         assert details is None or isinstance(details, CallDetails)
 
         try:
@@ -1403,8 +1411,8 @@ class WebClusterManager(object):
                     "ws": "92f5f4c7-4175-4c72-a0a6-81467c343565"
                 }
         """
-        assert type(webcluster_oid) == str
-        assert prefix is None or type(prefix) == str
+        assert isinstance(webcluster_oid, str)
+        assert prefix is None or isinstance(prefix, str)
         assert details is None or isinstance(details, CallDetails)
 
         self.log.info('{func}(webcluster_oid={webcluster_oid}, prefix="{prefix}", details={details})',
@@ -1467,9 +1475,9 @@ class WebClusterManager(object):
                     "webcluster_oid": "92f5f4c7-4175-4c72-a0a6-81467c343565"
                 }
         """
-        assert type(webcluster_oid) == str
-        assert type(path) == str
-        assert type(webservice) == dict
+        assert isinstance(webcluster_oid, str)
+        assert isinstance(path, str)
+        assert isinstance(webservice, dict)
         assert details is None or isinstance(details, CallDetails)
 
         self.log.info(
@@ -1589,8 +1597,8 @@ class WebClusterManager(object):
                     "webcluster_oid": "92f5f4c7-4175-4c72-a0a6-81467c343565"
                 }
         """
-        assert type(webcluster_oid) == str
-        assert type(webservice_oid) == str
+        assert isinstance(webcluster_oid, str)
+        assert isinstance(webservice_oid, str)
         assert details is None or isinstance(details, CallDetails)
 
         self.log.info(
@@ -1674,8 +1682,8 @@ class WebClusterManager(object):
                     "webcluster_oid": "92f5f4c7-4175-4c72-a0a6-81467c343565"
                 }
         """
-        assert type(webcluster_oid) == str
-        assert type(webservice_oid) == str
+        assert isinstance(webcluster_oid, str)
+        assert isinstance(webservice_oid, str)
         assert details is None or isinstance(details, CallDetails)
 
         self.log.info('{func}(webcluster_oid={webcluster_oid}, webservice_oid={webservice_oid}, details={details})',
@@ -1723,8 +1731,8 @@ class WebClusterManager(object):
 
         :return: see :meth:`crossbar.master.cluster.webcluster.WebClusterManager.get_webcluster_service`
         """
-        assert type(webcluster_oid) == str
-        assert type(path) == str
+        assert isinstance(webcluster_oid, str)
+        assert isinstance(path, str)
         assert details is None or isinstance(details, CallDetails)
 
         self.log.info('{func}(webcluster_oid={webcluster_oid}, path="{path}", details={details})',

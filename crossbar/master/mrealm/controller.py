@@ -1,7 +1,7 @@
 ###############################################################################
 #
 # Crossbar.io Master
-# Copyright (c) Crossbar.io Technologies GmbH. Licensed under EUPLv1.2.
+# Copyright (c) typedef int GmbH. Licensed under EUPLv1.2.
 #
 ###############################################################################
 
@@ -15,10 +15,6 @@ from pprint import pformat
 import six
 
 import zlmdb
-
-import nacl
-import nacl.signing
-import nacl.encoding
 
 from twisted.internet import defer
 from twisted.internet.defer import inlineCallbacks, returnValue, DeferredList, Deferred
@@ -35,7 +31,7 @@ from autobahn.wamp.exception import ApplicationError
 from autobahn.twisted.wamp import ApplicationSession
 
 from crossbar._util import hl, hlid, hlval, hltype
-from crossbar.common.key import _read_node_key, _read_release_key
+from crossbar.common.key import _read_release_key
 
 from cfxdb.mrealmschema import MrealmSchema
 from cfxdb.globalschema import GlobalSchema
@@ -168,26 +164,23 @@ class MrealmController(ApplicationSession):
         # Release (public) key
         self._release_pubkey_hex = _read_release_key()['hex']
 
-        # Node key
-        self._node_key_hex = _read_node_key('.', private=True)['hex']
-        self._node_key = nacl.signing.SigningKey(self._node_key_hex, encoder=nacl.encoding.HexEncoder)
-
-        assert 'mrealm' in config.extra and type(config.extra['mrealm'] == str)
+        assert 'mrealm' in config.extra and isinstance(config.extra['mrealm'], str)
         self._mrealm_oid = uuid.UUID(config.extra['mrealm'])
 
         # controller database
         #
         dbcfg = config.extra.get('controller-database', {})
-        assert dbcfg and type(dbcfg) == dict
+        assert dbcfg and isinstance(dbcfg, dict)
 
         dbfile = dbcfg.get('dbfile', None)
-        assert dbfile and type(dbfile) == six.text_type
+        assert dbfile and isinstance(dbfile, six.text_type)
 
         maxsize = dbcfg.get('maxsize', None)
         assert maxsize and type(maxsize) in six.integer_types
         assert maxsize >= 2**20 and maxsize < 2**30 * 10  # 1 MB - 10 GB maximum size
 
-        self.gdb = zlmdb.Database(dbpath=dbfile, maxsize=maxsize, readonly=False, sync=True)
+        # self.gdb = zlmdb.Database(dbpath=dbfile, maxsize=maxsize, readonly=False, sync=True, context=self)
+        self.gdb = zlmdb.Database.open(dbpath=dbfile, maxsize=maxsize, readonly=False, sync=True, context=self)
         self.gdb.__enter__()
         self.gschema: GlobalSchema = GlobalSchema.attach(self.gdb)
 
@@ -198,16 +191,17 @@ class MrealmController(ApplicationSession):
         # mrealm database
         #
         dbcfg = config.extra.get('database', {})
-        assert dbcfg and type(dbcfg) == dict
+        assert dbcfg and isinstance(dbcfg, dict)
 
         dbfile = dbcfg.get('dbfile', None)
-        assert dbfile and type(dbfile) == six.text_type
+        assert dbfile and isinstance(dbfile, six.text_type)
 
         maxsize = dbcfg.get('maxsize', None)
         assert maxsize and type(maxsize) in six.integer_types
         assert maxsize >= 2**20 and maxsize < 2**30 * 10  # 1 MB - 10 GB maximum size
 
-        self.db = zlmdb.Database(dbpath=dbfile, maxsize=maxsize, readonly=False, sync=True)
+        # self.db = zlmdb.Database(dbpath=dbfile, maxsize=maxsize, readonly=False, sync=True, context=self)
+        self.db = zlmdb.Database.open(dbpath=dbfile, maxsize=maxsize, readonly=False, sync=True, context=self)
         self.db.__enter__()
         self.schema = MrealmSchema.attach(self.db)
 
@@ -657,9 +651,9 @@ class MrealmController(ApplicationSession):
         :param details: Event details.
         :type details: :class:`autobahn.wamp.types.EventDetails`
         """
-        assert type(node_authid) == str
-        assert type(worker_id) == str
-        assert type(heartbeat) == dict
+        assert isinstance(node_authid, str)
+        assert isinstance(worker_id, str)
+        assert isinstance(heartbeat, dict)
         assert details is None or isinstance(details, EventDetails)
 
         started = time_ns()
@@ -730,23 +724,23 @@ class MrealmController(ApplicationSession):
         :param details: Event details.
         :type details: :class:`autobahn.wamp.types.EventDetails`
         """
-        assert type(node_authid) == str
-        assert type(heartbeat) == dict
+        assert isinstance(node_authid, str)
+        assert isinstance(heartbeat, dict)
         assert details is None or isinstance(details, EventDetails)
 
         started = time_ns()
 
         heartbeat_time = heartbeat.get('timestamp', None)
-        assert type(heartbeat_time) == int
+        assert isinstance(heartbeat_time, int)
 
         heartbeat_seq = heartbeat.get('seq', None)
-        assert type(heartbeat_seq) == int
+        assert isinstance(heartbeat_seq, int)
 
         heartbeat_pubkey = heartbeat.get('pubkey', None)
-        assert type(heartbeat_pubkey) == str and len(heartbeat_pubkey) == 64
+        assert heartbeat_pubkey is None or (isinstance(heartbeat_pubkey, str) and len(heartbeat_pubkey) == 64)
 
         heartbeat_workers = heartbeat.get('workers', {})
-        assert type(heartbeat_workers) == dict
+        assert isinstance(heartbeat_workers, dict)
         for worker_type in heartbeat_workers:
             # FIXME:
             ALLOWED_WORKER_TYPES = [
@@ -755,7 +749,7 @@ class MrealmController(ApplicationSession):
             ]
             assert worker_type in ALLOWED_WORKER_TYPES, 'invalid worker type "{}" (valid types: {})'.format(
                 worker_type, ALLOWED_WORKER_TYPES)
-            assert type(heartbeat_workers[worker_type]) == int
+            assert isinstance(heartbeat_workers[worker_type], int)
 
         self.log.debug(
             'Heartbeat from node "{node_authid}" with workers {heartbeat_workers} [heartbeat_seq={heartbeat_seq}, time={heartbeat_time}, publisher={publisher}, authid={authid}]',

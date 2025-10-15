@@ -1,5 +1,5 @@
 # coding=utf8
-# XBR Network - Copyright (c) Crossbar.io Technologies GmbH. Licensed under EUPLv1.2.
+# XBR Network - Copyright (c) typedef int GmbH. Licensed under EUPLv1.2.
 
 import binascii
 
@@ -14,8 +14,8 @@ import numpy as np
 
 from autobahn.wamp import register, CallDetails
 from autobahn.xbr import recover_eip712_market_member_login, is_cs_pubkey, is_signature, \
-    is_address, without_0x
-from autobahn.util import generate_serial_number
+    is_address
+from autobahn.util import generate_serial_number, without_0x
 from autobahn.wamp.exception import ApplicationError
 
 import cfxdb
@@ -72,7 +72,7 @@ class Authenticator:
         assert is_cs_pubkey(pubkey)
 
         session_id = details['session']
-        assert type(session_id) == int
+        assert isinstance(session_id, int)
 
         # FIXME: find a more elegant way to query the db.
         def get_actor(_txn, address):

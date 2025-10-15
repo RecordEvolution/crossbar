@@ -1,6 +1,6 @@
 #####################################################################################
 #
-#  Copyright (c) Crossbar.io Technologies GmbH
+#  Copyright (c) typedef int GmbH
 #  SPDX-License-Identifier: EUPL-1.2
 #
 #####################################################################################
@@ -39,10 +39,6 @@ class NativeWorkerClientProtocol(WampWebSocketClientProtocol):
         # the trust is established implicitly by the way the
         # the client (worker) is created
         self._authprovider = 'programcode'
-
-        # FIXME / CHECKME
-        self._cbtid = None
-        self._transport_info = None
 
     def connectionLost(self, reason):
         if isinstance(reason.value, ConnectionDone):

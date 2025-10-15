@@ -1,5 +1,5 @@
 # coding=utf8
-# XBR Network - Copyright (c) Crossbar.io Technologies GmbH. Licensed under EUPLv1.2.
+# XBR Network - Copyright (c) typedef int GmbH. Licensed under EUPLv1.2.
 
 import sys
 import os
@@ -15,6 +15,7 @@ import multihash
 import cbor2
 
 import txaio
+
 txaio.use_twisted()
 
 from twisted.internet import reactor
@@ -42,7 +43,7 @@ class XbrDelegate(ApplicationSession):
 
         self.log.info("Client (delegate) Ethereum key loaded (adr=0x{adr})", adr=self._ethadr)
 
-        self._key = cryptosign.SigningKey.from_key_bytes(config.extra['cskey'])
+        self._key = cryptosign.CryptosignKey.from_bytes(config.extra['cskey'])
         self.log.info("Client (delegate) WAMP-cryptosign authentication key loaded (pubkey=0x{pubkey})",
                       pubkey=self._key.public_key())
 
@@ -67,7 +68,12 @@ class XbrDelegate(ApplicationSession):
         self.log.info('{klass}.onChallenge(challenge={challenge})', klass=self.__class__.__name__, challenge=challenge)
 
         if challenge.method == 'cryptosign':
-            signed_challenge = self._key.sign_challenge(self, challenge)
+            # sign the challenge with our private key.
+            channel_id_type = self.config.extra.get('channel_binding', None)
+            channel_id = self.transport.transport_details.channel_id.get(channel_id_type, None)
+            signed_challenge = self._key.sign_challenge(challenge,
+                                                        channel_id=channel_id,
+                                                        channel_id_type=channel_id_type)
             return signed_challenge
         else:
             raise RuntimeError('unable to process authentication method {}'.format(challenge.method))
@@ -122,12 +128,12 @@ class XbrDelegate(ApplicationSession):
                     member_adr=binascii.b2a_hex(member_adr).decode(),
                     request_submitted=pformat(request_submitted))
 
-                assert type(request_submitted) == dict
-                assert 'created' in request_submitted and type(
-                    request_submitted['created']) == int and request_submitted['created'] > 0
+                assert isinstance(request_submitted, dict)
+                assert 'created' in request_submitted and isinstance(request_submitted['created'],
+                                                                     int) and request_submitted['created'] > 0
                 assert 'action' in request_submitted and request_submitted['action'] == 'join_market'
-                assert 'vaction_oid' in request_submitted and type(request_submitted['vaction_oid']) == bytes and len(
-                    request_submitted['vaction_oid']) == 16
+                assert ('vaction_oid' in request_submitted and isinstance(request_submitted['vaction_oid'], bytes)
+                        and len(request_submitted['vaction_oid']) == 16)
 
                 vaction_oid = UUID(bytes=request_submitted['vaction_oid'])
                 self.log.info('Join market verification "{vaction_oid}" created', vaction_oid=vaction_oid)
@@ -154,11 +160,11 @@ class XbrDelegate(ApplicationSession):
                 self.log.info('Join market request verified: \n{request_verified}\n',
                               request_verified=pformat(request_verified))
 
-                assert type(request_verified) == dict
-                assert 'market_oid' in request_verified and type(request_verified['market_oid']) == bytes and len(
+                assert isinstance(request_verified, dict)
+                assert 'market_oid' in request_verified and isinstance(request_verified['market_oid'], bytes) and len(
                     request_verified['market_oid']) == 16
-                assert 'created' in request_verified and type(
-                    request_verified['created']) == int and request_verified['created'] > 0
+                assert 'created' in request_verified and isinstance(request_verified['created'],
+                                                                    int) and request_verified['created'] > 0
 
                 market_oid = request_verified['market_oid']
                 self.log.info(

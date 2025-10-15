@@ -1,6 +1,6 @@
 #####################################################################################
 #
-#  Copyright (c) Crossbar.io Technologies GmbH
+#  Copyright (c) typedef int GmbH
 #  SPDX-License-Identifier: EUPL-1.2
 #
 #####################################################################################
@@ -11,6 +11,28 @@ import os
 import sys
 
 import psutil
+
+# monkey patch eth_abi for master branch (which we need for python 3.11)
+# https://github.com/ethereum/eth-abi/blob/master/docs/release_notes.rst#breaking-changes
+# https://github.com/ethereum/eth-abi/pull/161
+# ImportError: cannot import name 'encode_single' from 'eth_abi' (/home/oberstet/cpy311_2/lib/python3.11/site-packages/eth_abi/__init__.py)
+import eth_abi
+if not hasattr(eth_abi, 'encode_abi') and hasattr(eth_abi, 'encode'):
+    eth_abi.encode_abi = eth_abi.encode
+if not hasattr(eth_abi, 'encode_single') and hasattr(eth_abi, 'encode'):
+    eth_abi.encode_single = eth_abi.encode
+
+import eth_typing
+if not hasattr(eth_typing, 'ChainID') and hasattr(eth_typing, 'ChainId'):
+    eth_typing.ChainID = eth_typing.ChainId
+
+# monkey patch web3 for master branch / upcoming v6 (which we need for python 3.11)
+# AttributeError: type object 'Web3' has no attribute 'toChecksumAddress'. Did you mean: 'to_checksum_address'?
+import web3
+if not hasattr(web3.Web3, 'toChecksumAddress') and hasattr(web3.Web3, 'to_checksum_address'):
+    web3.Web3.toChecksumAddress = lambda x: web3.Web3.to_checksum_address(x)
+if not hasattr(web3.Web3, 'isConnected') and hasattr(web3.Web3, 'is_connected'):
+    web3.Web3.isConnected = web3.Web3.is_connected
 
 from crossbar._util import hl
 from crossbar._version import __version__, __build__
@@ -79,6 +101,10 @@ if not hasattr(abi, 'process_type'):
 # https://docs.python.org/3/library/warnings.html
 # /opt/pypy3/lib-python/3/importlib/_bootstrap.py:223: builtins.UserWarning: builtins.type size changed, may indicate binary incompatibility. Expected 872, got 416
 warnings.filterwarnings("ignore", message="builtins.type size changed, may indicate binary incompatibility")
+
+# https://peps.python.org/pep-0632/
+# site-packages/_distutils_hack/__init__.py:30: builtins.UserWarning: Setuptools is replacing distutils.
+warnings.filterwarnings("ignore", message="Setuptools is replacing distutils.")
 
 __all__ = ('__version__', '__build__', 'run', 'personalities')
 

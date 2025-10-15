@@ -1,24 +1,29 @@
 #####################################################################################
 #
-#  Copyright (c) Crossbar.io Technologies GmbH
+#  Copyright (c) typedef int GmbH
 #  SPDX-License-Identifier: EUPL-1.2
 #
 #####################################################################################
-from crossbar.worker.transport import TransportController
-from crossbar.worker.types import RouterComponent, RouterRealm, RouterRealmRole
+
+from uuid import uuid4
+from typing import Dict
+from pprint import pformat
+
 from twisted.internet.defer import Deferred, DeferredList, maybeDeferred, returnValue
 from twisted.internet.defer import inlineCallbacks
 from twisted.python.failure import Failure
 from twisted.internet.defer import succeed
-from uuid import uuid4
 
 from autobahn import wamp
 from autobahn.util import utcstr
 from autobahn.wamp.exception import ApplicationError
 from autobahn.wamp.types import PublishOptions, ComponentConfig, CallDetails, SessionIdent
+from autobahn.wamp.message import identify_realm_name_category
 
 from crossbar._util import class_name, hltype, hlid, hlval
 
+from crossbar.worker.transport import TransportController, RouterTransport
+from crossbar.worker.types import RouterComponent, RouterRealm, RouterRealmRole
 from crossbar.router.session import RouterSessionFactory
 from crossbar.router.service import RouterServiceAgent
 from crossbar.router.router import RouterFactory
@@ -55,21 +60,21 @@ class RouterController(TransportController):
         self._router_session_factory = RouterSessionFactory(self._router_factory)
 
         # map: realm ID -> RouterRealm
-        self.realms = {}
+        self.realms: Dict[str, RouterRealm] = {}
 
-        # map: realm URI -> realm ID
-        self.realm_to_id = {}
+        # map: realm URI name -> realm ID
+        self.realm_to_id: Dict[str, str] = {}
 
         self._service_sessions = {}
 
         # map: component ID -> RouterComponent
-        self.components = {}
+        self.components: Dict[str, RouterComponent] = {}
 
         # "global" shared between all components
         self.components_shared = {'reactor': reactor}
 
         # map: transport ID -> RouterTransport
-        self.transports = {}
+        self.transports: Dict[str, RouterTransport] = {}
 
     def realm_by_name(self, name):
         realm_id = self.realm_to_id.get(name, None)
@@ -128,8 +133,8 @@ class RouterController(TransportController):
 
                     def done(_):
                         self.log.info(
-                            "component '{id}' disconnected",
-                            id=component.id,
+                            "component '{component_id}' disconnected",
+                            component_id=component.id,
                         )
                         component.session.disconnect()
 
@@ -235,7 +240,39 @@ class RouterController(TransportController):
     @inlineCallbacks
     def start_router_realm(self, realm_id, realm_config, details=None):
         """
-        Starts a realm on this router worker.
+        Starts a realm on this router worker. The minimum configuration must contain the realm name:
+
+        .. code-block:: python
+
+            {
+                "name": "realm1"
+            }
+
+        The configuration can also configure one or more roles, including configuration of role permissions:
+
+        .. code-block:: python
+
+            {
+                "name": "realm1",
+                "roles": [{
+                    "name": "anonymous",
+                    "permissions": [{
+                        "uri": "",
+                        "match": "prefix",
+                        "allow": {
+                            "call": True,
+                            "register": True,
+                            "publish": True,
+                            "subscribe": True
+                        },
+                        "disclose": {
+                            "caller": True,
+                            "publisher": True
+                        },
+                        "cache": True
+                    }]
+                }]
+            }
 
         :param realm_id: The ID of the realm to start.
         :type realm_id: str
@@ -269,6 +306,23 @@ class RouterController(TransportController):
         # URI of the realm to start
         realm_name = realm_config['name']
 
+        # Category of the realm to start, as determined
+        # from realm name: "standalone", "eth", "ens", "reverse_ens" or None
+        realm_category = identify_realm_name_category(realm_name)
+        if realm_category is None:
+            emsg = 'Invalid router realm configuration: the name "{}" is not a valid WAMP realm name'.format(
+                realm_name)
+            self.log.error(emsg)
+            raise ApplicationError("crossbar.error.invalid_configuration", emsg)
+        else:
+            self.log.info(
+                '{func} starting {realm_category}-realm with WAMP realm name "{realm_name}" '
+                'using router local realm_id {realm_id}',
+                func=hltype(self.start_router_realm),
+                realm_name=hlid(realm_name),
+                realm_id=hlid(realm_id),
+                realm_category=hlval(realm_category.upper(), color='magenta'))
+
         # router/realm wide options
         options = realm_config.get('options', {})
 
@@ -284,7 +338,7 @@ class RouterController(TransportController):
             bridge_meta_api_prefix = None
 
         # track realm
-        rlm = self.router_realm_class(self, realm_id, realm_config)
+        rlm = self.router_realm_class(self, realm_id, realm_config, realm_category)
         self.realms[realm_id] = rlm
         self.realm_to_id[realm_name] = realm_id
 
@@ -296,7 +350,10 @@ class RouterController(TransportController):
 
         # add a router/realm service session
         extra = {
-            # the RouterServiceAgent will fire this when it is ready
+            # the realm category, one of ["standalone", "eth", "ens", "reverse_ens"]
+            'category': realm_category,
+
+            # the RouterServiceAgent will fire this in onJoin() when it is ready
             'onready': Deferred(),
 
             # if True, forward the WAMP meta API (implemented by RouterServiceAgent)
@@ -310,17 +367,29 @@ class RouterController(TransportController):
             # the WAMP meta API is exposed to additionally, when the bridge_meta_api option is set
             'management_session': self,
         }
+
+        # WAMP session configuration for service agent (WAMP meta API)
         cfg = ComponentConfig(realm_name, extra)
-        # each worker is run under its own dedicated WAMP auth role
-        # svc_authrole = 'crossbar.worker.{}'.format(self._worker_id)
+
         # wamp meta api only allowed for "trusted" sessions
         svc_authrole = 'trusted'
+
+        # each worker is run under its own dedicated WAMP auth role
+        # svc_authrole = 'crossbar.worker.{}'.format(self._worker_id)
         svc_authid = 'routerworker-{}-realm-{}-serviceagent'.format(self._worker_id, realm_id)
+
+        # create WAMP session for the service agent (WAMP meta API) and store on realm object
         rlm.session = RouterServiceAgent(cfg, rlm.router)
+
+        # add the service agent session directly on the router (under the respective authid/authrole)
         self._router_session_factory.add(rlm.session, rlm.router, authid=svc_authid, authrole=svc_authrole)
 
-        yield extra['onready']
+        # set the service agent (WAMP meta API) session on the realm container
         self.set_service_session(rlm.session, realm_name, authrole=svc_authrole)
+
+        # already fired at the end of RouterServiceAgent.onJoin
+        # yield extra['onready']
+
         self.log.info(
             'RouterServiceAgent started on realm="{realm_name}" with authrole="{authrole}", authid="{authid}"',
             realm_name=realm_name,
@@ -334,11 +403,13 @@ class RouterController(TransportController):
         caller = details.caller if details else None
         self.publish(topic, event, options=PublishOptions(exclude=caller))
 
-        self.log.info('Realm "{realm_id}" (name="{realm_name}", authrole="{authrole}", authid="{authid}") started',
-                      realm_id=realm_id,
-                      realm_name=rlm.session._realm,
-                      authrole=svc_authrole,
-                      authid=svc_authid)
+        self.log.info(
+            'Realm "{realm_id}" (category="{realm_category}", name="{realm_name}", authrole="{authrole}", authid="{authid}") started',
+            realm_id=realm_id,
+            realm_category=realm_category,
+            realm_name=rlm.session._realm,
+            authrole=svc_authrole,
+            authid=svc_authid)
         return event
 
     @wamp.register(None)
@@ -550,11 +621,14 @@ class RouterController(TransportController):
         caller = details.caller if details else None
         self.publish(topic, event, options=PublishOptions(exclude=caller))
 
-        self.log.info('Role {role_id} named "{role_name}" started on realm "{realm}"',
-                      role_id=hlid(role_id),
-                      role_name=hlid(role_name),
-                      realm=hlid(realm),
-                      func=hltype(self.start_router_realm_role))
+        self.log.debug(
+            'Role {role_id} named "{role_name}" started on realm "{realm}" '
+            'with configuration=\n{role_config}',
+            role_id=hlid(role_id),
+            role_name=hlid(role_name),
+            realm=hlid(realm),
+            role_config=pformat(role_config),
+            func=hltype(self.start_router_realm_role))
         return event
 
     @wamp.register(None)
@@ -614,12 +688,12 @@ class RouterController(TransportController):
         return res
 
     @wamp.register(None)
-    def get_router_component(self, id, details=None):
+    def get_router_component(self, component_id, details=None):
         """
         Get details about a router component
 
-        :param id: The ID of the component to get
-        :type id: str
+        :param component_id: The ID of the component to get
+        :type component_id: str
 
         :param details: Call details.
         :type details: :class:`autobahn.wamp.types.CallDetails`
@@ -627,19 +701,21 @@ class RouterController(TransportController):
         :returns: Details of component
         :rtype: dict
         """
-        self.log.debug("{name}.get_router_component({id})", name=self.__class__.__name__, id=id)
-        if id in self.components:
-            return self.components[id].marshal()
+        self.log.debug("{name}.get_router_component({component_id})",
+                       name=self.__class__.__name__,
+                       component_id=component_id)
+        if component_id in self.components:
+            return self.components[component_id].marshal()
         else:
-            raise ApplicationError("crossbar.error.no_such_object", "No component {}".format(id))
+            raise ApplicationError("crossbar.error.no_such_object", "No component {}".format(component_id))
 
     @wamp.register(None)
-    def start_router_component(self, id, config, details=None):
+    def start_router_component(self, component_id, config, details=None):
         """
         Start an app component in this router worker.
 
-        :param id: The ID of the component to start.
-        :type id: str
+        :param component_id: The ID of the component to start.
+        :type component_id: str
 
         :param config: The component configuration.
         :type config: dict
@@ -651,8 +727,9 @@ class RouterController(TransportController):
 
         # prohibit starting a component twice
         #
-        if id in self.components:
-            emsg = "Could not start component: a component with ID '{}'' is already running (or starting)".format(id)
+        if component_id in self.components:
+            emsg = "Could not start component: a component with ID '{}' is already running (or starting)".format(
+                component_id)
             self.log.error(emsg)
             raise ApplicationError('crossbar.error.already_running', emsg)
 
@@ -732,10 +809,9 @@ class RouterController(TransportController):
                 self.log.debug(emsg)
                 raise ApplicationError('crossbar.error.invalid_configuration', emsg)
             else:
-                self.log.debug('starting router component "{component_id}" ..', component_id=id)
+                self.log.debug('starting router component "{component_id}" ..', component_id=component_id)
 
-        # .. and create and add an WAMP application session to
-        # run the component next to the router
+        # create and add an WAMP application session to run the component next to the router
         try:
             session = create_component(component_config)
 
@@ -763,7 +839,7 @@ class RouterController(TransportController):
                 session_id=session._session_id,
             )
             topic = self._uri_prefix + '.on_component_stop'
-            event = {'id': id}
+            event = {'id': component_id}
             caller = details.caller if details else None
             self.publish(topic, event, options=PublishOptions(exclude=caller))
             if not started_d.called:
@@ -780,7 +856,7 @@ class RouterController(TransportController):
                 session_id=session._session_id,
             )
             topic = self._uri_prefix + '.on_component_ready'
-            event = {'id': id}
+            event = {'id': component_id}
             self.publish(topic, event)
             started_d.callback(event)
             return event
@@ -800,7 +876,7 @@ class RouterController(TransportController):
                 session_id=session._session_id,
             )
             topic = self._uri_prefix + '.on_component_start'
-            event = {'id': id}
+            event = {'id': component_id}
             caller = details.caller if details else None
             self.publish(topic, event, options=PublishOptions(exclude=caller))
             return event
@@ -808,43 +884,48 @@ class RouterController(TransportController):
         session.on('leave', publish_stopped)
         session.on('join', publish_started)
 
-        self.components[id] = RouterComponent(id, config, session)
+        self.components[component_id] = RouterComponent(component_id, config, session)
         router = self._router_factory.get(realm)
         self._router_session_factory.add(session,
                                          router,
                                          authrole=config.get('role', 'anonymous'),
                                          authid=uuid4().__str__())
         self.log.debug(
-            "Added component {id} (type '{name}')",
-            id=id,
+            "Added component {component_id} (type '{name}')",
+            component_id=component_id,
             name=class_name(session),
         )
         return started_d
 
     @wamp.register(None)
-    def stop_router_component(self, id, details=None):
+    def stop_router_component(self, component_id, details=None):
         """
         Stop an app component currently running in this router worker.
 
-        :param id: The ID of the component to stop.
-        :type id: str
+        :param component_id: The ID of the component to stop.
+        :type component_id: str
 
         :param details: Call details.
         :type details: :class:`autobahn.wamp.types.CallDetails`
         """
-        self.log.debug("{name}.stop_router_component({id})", name=self.__class__.__name__, id=id)
+        self.log.debug("{name}.stop_router_component({component_id})",
+                       name=self.__class__.__name__,
+                       component_id=component_id)
 
-        if id in self.components:
-            self.log.debug("Worker {worker}: stopping component {id}", worker=self.config.extra.worker, id=id)
+        if component_id in self.components:
+            self.log.debug("Worker {worker}: stopping component {component_id}",
+                           worker=self.config.extra.worker,
+                           component_id=component_id)
 
             try:
                 # self._components[id].disconnect()
-                self._session_factory.remove(self.components[id])
-                del self.components[id]
+                self._session_factory.remove(self.components[component_id])
+                del self.components[component_id]
             except Exception as e:
-                raise ApplicationError("crossbar.error.cannot_stop", "Failed to stop component {}: {}".format(id, e))
+                raise ApplicationError("crossbar.error.cannot_stop",
+                                       "Failed to stop component {}: {}".format(component_id, e))
         else:
-            raise ApplicationError("crossbar.error.no_such_object", "No component {}".format(id))
+            raise ApplicationError("crossbar.error.no_such_object", "No component {}".format(component_id))
 
     @wamp.register(None)
     def get_router_transports(self, details=None):
@@ -1033,7 +1114,7 @@ class RouterController(TransportController):
         :returns: List of router link IDs.
         :rtype: list[str]
         """
-        assert type(realm_id) == str
+        assert isinstance(realm_id, str)
         assert isinstance(details, CallDetails)
 
         self.log.info('{method} Getting router links for realm {realm_id}',
@@ -1061,8 +1142,8 @@ class RouterController(TransportController):
         :returns: Router link detail information.
         :rtype: dict
         """
-        assert type(realm_id) == str
-        assert type(link_id) == str
+        assert isinstance(realm_id, str)
+        assert isinstance(link_id, str)
         assert isinstance(details, CallDetails)
 
         self.log.info('{method} Get router link {link_id} on realm {realm_id}',
@@ -1118,9 +1199,9 @@ class RouterController(TransportController):
         :returns: The new link detail information.
         :rtype: dict
         """
-        assert type(realm_id) == str
-        assert type(link_id) == str
-        assert type(link_config) == dict
+        assert isinstance(realm_id, str)
+        assert isinstance(link_id, str)
+        assert isinstance(link_config, dict)
         assert isinstance(details, CallDetails)
 
         self.log.info('{method} Router link {link_id} starting on realm {realm_id} ..',
@@ -1172,8 +1253,8 @@ class RouterController(TransportController):
         :returns: The stopped link detail information.
         :rtype: dict
         """
-        assert type(realm_id) == str
-        assert type(link_id) == str
+        assert isinstance(realm_id, str)
+        assert isinstance(link_id, str)
         assert isinstance(details, CallDetails)
 
         self.log.info('{method} Router link {link_id} stopping on realm {realm_id}',

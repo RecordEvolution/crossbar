@@ -1,6 +1,6 @@
 #####################################################################################
 #
-#  Copyright (c) Crossbar.io Technologies GmbH
+#  Copyright (c) typedef int GmbH
 #  SPDX-License-Identifier: EUPL-1.2
 #
 #####################################################################################
@@ -12,8 +12,10 @@ import hmac
 import hashlib
 import base64
 import binascii
+from typing import Dict, Any
 
 from autobahn.wamp.exception import ApplicationError
+from autobahn.twisted.wamp import ApplicationSession
 
 from txaio import make_logger
 
@@ -30,6 +32,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives import hmac as hazmat_hmac
 
 from autobahn.websocket.utf8validator import Utf8Validator
+
 _validator = Utf8Validator()
 
 _ALLOWED_CONTENT_TYPES = set([b'application/json'])
@@ -90,19 +93,20 @@ class _CommonResource(Resource):
     isLeaf = True
     decode_as_json = True
 
-    def __init__(self, options, session):
+    def __init__(self, options: Dict[str, Any], session: ApplicationSession):
         """
-        Ctor.
 
         :param options: Options for path service from configuration.
-        :type options: dict
-        :param session: Instance of `ApplicationSession` to be used for forwarding events.
-        :type session: obj
+        :param session: WAMP session to be used for forwarding events / calls.
         """
         Resource.__init__(self)
         self._options = options
         self._session = session
+        self._debug = False
         self.log = make_logger()
+
+        if 'debug' in options and options['debug']:
+            self._debug = True
 
         self._key = None
         if 'key' in options:

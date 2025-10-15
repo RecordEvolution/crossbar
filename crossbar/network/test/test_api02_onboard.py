@@ -1,5 +1,5 @@
 # coding=utf8
-# XBR Network - Copyright (c) Crossbar.io Technologies GmbH. Licensed under EUPLv1.2.
+# XBR Network - Copyright (c) typedef int GmbH. Licensed under EUPLv1.2.
 
 import os
 import binascii
@@ -9,6 +9,7 @@ import cbor2
 from pprint import pformat
 
 import txaio
+
 txaio.use_twisted()
 
 import hashlib
@@ -39,7 +40,7 @@ class XbrDelegate(ApplicationSession):
         self.log.info("Client (delegate) Ethereum key loaded (adr={adr})",
                       adr=self._ethkey.public_key.to_canonical_address())
 
-        self._key = cryptosign.SigningKey.from_key_bytes(config.extra['cskey'])
+        self._key = cryptosign.CryptosignKey.from_bytes(config.extra['cskey'])
         self.log.info("Client (delegate) WAMP-cryptosign authentication key loaded (pubkey={pubkey})",
                       pubkey=self._key.public_key())
 
@@ -66,7 +67,12 @@ class XbrDelegate(ApplicationSession):
         self.log.info('{klass}.onChallenge(challenge={challenge})', klass=self.__class__.__name__, challenge=challenge)
 
         if challenge.method == 'cryptosign':
-            signed_challenge = self._key.sign_challenge(self, challenge)
+            # sign the challenge with our private key.
+            channel_id_type = self.config.extra.get('channel_binding', None)
+            channel_id = self.transport.transport_details.channel_id.get(channel_id_type, None)
+            signed_challenge = self._key.sign_challenge(challenge,
+                                                        channel_id=channel_id,
+                                                        channel_id_type=channel_id_type)
             return signed_challenge
         else:
             raise RuntimeError('unable to process authentication method {}'.format(challenge.method))
@@ -129,10 +135,10 @@ class XbrDelegate(ApplicationSession):
             except Exception as e:
                 raise e
 
-            assert type(result) == dict
-            assert 'timestamp' in result and type(result['timestamp']) == int and result['timestamp'] > 0
+            assert isinstance(result, dict)
+            assert 'timestamp' in result and isinstance(result['timestamp'], int) and result['timestamp'] > 0
             assert 'action' in result and result['action'] == 'onboard_member'
-            assert 'vaction_oid' in result and type(result['vaction_oid']) == bytes and len(
+            assert 'vaction_oid' in result and isinstance(result['vaction_oid'], bytes) and len(
                 result['vaction_oid']) == 16
 
             vaction_oid = uuid.UUID(bytes=result['vaction_oid'])
@@ -162,9 +168,10 @@ class XbrDelegate(ApplicationSession):
                 self.log.error('ApplicationError: {error}', error=e)
                 raise e
 
-            assert type(result) == dict
-            assert 'member_oid' in result and type(result['member_oid']) == bytes and len(result['member_oid']) == 16
-            assert 'created' in result and type(result['created']) == int and result['created'] > 0
+            assert isinstance(result, dict)
+            assert 'member_oid' in result and isinstance(result['member_oid'], bytes) and len(
+                result['member_oid']) == 16
+            assert 'created' in result and isinstance(result['created'], int) and result['created'] > 0
 
             member_oid = result['member_oid']
             self.log.info('SUCCESS! New XBR Member onboarded: member_oid={member_oid}, result=\n{result}',

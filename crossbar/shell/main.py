@@ -1,7 +1,7 @@
 ###############################################################################
 #
 # Crossbar.io Shell
-# Copyright (c) Crossbar.io Technologies GmbH. Licensed under EUPLv1.2.
+# Copyright (c) typedef int GmbH. Licensed under EUPLv1.2.
 #
 ###############################################################################
 
@@ -29,6 +29,7 @@ import _cffi_backend  # noqa
 
 # import and select network framework in txaio _before_ any further crossbar.shell imports
 import txaio
+
 txaio.use_twisted()  # noqa
 
 from cfxdb.exporter import Exporter
@@ -692,6 +693,15 @@ def cmd_remove_routeercluster_workergroup(ctx, cluster, workergroup):
     ctx.obj.app.run_context(ctx, cmd)
 
 
+@cmd_remove.command(name='webcluster-node', help='remove a node from a webcluster')
+@click.argument('cluster')
+@click.argument('node')
+@click.pass_context
+def cmd_remove_webcluster_node(ctx, cluster, node):
+    cmd = command.CmdRemoveWebClusterNode(cluster, node)
+    ctx.obj.app.run_context(ctx, cmd)
+
+
 @cmd_remove.command(name='webcluster-service', help='remove a service from a webcluster')
 @click.argument('cluster')
 @click.argument('path')
@@ -701,12 +711,40 @@ def cmd_remove_webcluster_service(ctx, cluster, path):
     ctx.obj.app.run_context(ctx, cmd)
 
 
-@cmd_remove.command(name='webcluster-node', help='remove a node from a webcluster')
-@click.argument('cluster')
-@click.argument('node')
+@cmd_remove.command(name='arealm-principal', help='remove a principal from an application realm')
+@click.argument('arealm')
+@click.argument('principal')
 @click.pass_context
-def cmd_remove_webcluster_node(ctx, cluster, node):
-    cmd = command.CmdRemoveWebClusterNode(cluster, node)
+def cmd_remove_arealm_principal(ctx, arealm, principal):
+    cmd = command.CmdRemoveArealmPrincipal(arealm, principal)
+    ctx.obj.app.run_context(ctx, cmd)
+
+
+@cmd_remove.command(name='principal-credential', help='remove credentials from a principal on an application realm')
+@click.argument('arealm')
+@click.argument('principal')
+@click.argument('credential')
+@click.pass_context
+def cmd_remove_arealm_principal_credential(ctx, arealm, principal, credential):
+    cmd = command.CmdRemoveArealmPrincipalCredential(arealm, principal, credential)
+    ctx.obj.app.run_context(ctx, cmd)
+
+
+@cmd_remove.command(name='role-permission', help='remove a permission from a role')
+@click.argument('role')
+@click.argument('path')
+@click.pass_context
+def cmd_remove_role_permission(ctx, role, path):
+    cmd = command.CmdRemoveRolePermission(role, path)
+    ctx.obj.app.run_context(ctx, cmd)
+
+
+@cmd_remove.command(name='arealm-role', help='remove a role from an application realm')
+@click.argument('arealm')
+@click.argument('role')
+@click.pass_context
+def cmd_remove_arealm_role(ctx, arealm, role):
+    cmd = command.CmdRemoveArealmRole(arealm, role)
     ctx.obj.app.run_context(ctx, cmd)
 
 
@@ -743,6 +781,23 @@ def cmd_delete_routercluster(ctx, cluster):
 @click.pass_context
 def cmd_delete_webcluster(ctx, cluster):
     cmd = command.CmdDeleteWebCluster(cluster)
+    ctx.obj.app.run_context(ctx, cmd)
+
+
+@cmd_delete.command(name='arealm', help='delete an existing application realm')
+@click.argument('arealm')
+@click.option('--cascade', is_flag=True, help='Automatically delete dependent resources of the application realm.')
+@click.pass_context
+def cmd_delete_arealm(ctx, arealm, cascade=False):
+    cmd = command.CmdDeleteApplicationRealm(arealm, cascade)
+    ctx.obj.app.run_context(ctx, cmd)
+
+
+@cmd_delete.command(name='role', help='delete an existing application role')
+@click.argument('role')
+@click.pass_context
+def cmd_delete_role(ctx, role):
+    cmd = command.CmdDeleteRole(role)
     ctx.obj.app.run_context(ctx, cmd)
 
 
@@ -787,10 +842,10 @@ def cmd_pair_node(ctx, pubkey, realm, node_id, authextra=None):
     :param authextra: authextra to be provided to the node when connecting, must be a JSON string
     :return:
     """
-    assert type(pubkey) == str
-    assert type(realm) == str
-    assert type(node_id) == str
-    assert authextra is None or type(authextra) == str
+    assert isinstance(pubkey, str)
+    assert isinstance(realm, str)
+    assert isinstance(node_id, str)
+    assert authextra is None or isinstance(authextra, str)
 
     pubkey = _read_pubkey(pubkey)
 
@@ -817,7 +872,7 @@ def cmd_unpair_node(ctx, pubkey):
     :param pubkey:
     :return:
     """
-    assert type(pubkey) == str
+    assert isinstance(pubkey, str)
 
     pubkey = _read_pubkey(pubkey)
 

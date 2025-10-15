@@ -1,6 +1,6 @@
 #####################################################################################
 #
-#  Copyright (c) Crossbar.io Technologies GmbH
+#  Copyright (c) typedef int GmbH
 #  SPDX-License-Identifier: EUPL-1.2
 #
 #####################################################################################
@@ -9,13 +9,14 @@ import copy
 import pprint
 
 from collections.abc import Mapping, Sequence
+from typing import Dict
 
 from twisted.internet.defer import Deferred, inlineCallbacks
 
 from autobahn import util
 from autobahn.wamp.types import SessionIdent
+from autobahn.util import hl, hlid, hltype, hluserid, hlval
 
-from crossbar._util import hl, hlid, hltype, hluserid
 from crossbar.common.checkconfig import check_dict_args, check_realm_name, check_connecting_transport
 from crossbar.common.twisted.endpoint import create_connecting_endpoint_from_config
 
@@ -66,26 +67,34 @@ class BridgeSession(ApplicationSession):
             other=other)
 
         @inlineCallbacks
-        def on_subscription_create(sub_id, sub_details, details=None):
+        def on_subscription_create(sub_session, sub_details, details=None):
             """
             Event handler fired when a new subscription was created on this router.
 
             The handler will then also subscribe on the other router, and when receiving
             events, re-publish those on this router.
 
-            :param sub_id:
+            :param sub_session:
             :param sub_details:
             :param details:
             :return:
             """
-            if sub_id in self._subs:
-                # this should not happen actually, but not sure ..
+            if sub_details["uri"].startswith("wamp."):
+                return
+
+            sub_id = sub_details["id"]
+
+            if sub_id in self._subs and self._subs[sub_id]["sub"]:
+                # This will happen if, partway through the subscription process, the RLink disconnects
                 self.log.error('on_subscription_create: sub ID {sub_id} already in map {method}',
                                sub_id=sub_id,
                                method=hltype(BridgeSession._setup_event_forwarding))
                 return
 
-            self._subs[sub_id] = sub_details
+            sub_details_local = copy.deepcopy(sub_details)
+            if sub_id not in self._subs:
+                sub_details_local["sub"] = None
+                self._subs[sub_id] = sub_details_local
 
             uri = sub_details['uri']
             ERR_MSG = [None]
@@ -113,7 +122,7 @@ class BridgeSession(ApplicationSession):
                 }
 
                 if details.forward_for:
-                    # the event comes already forwarded from a router node ..
+                    # the event comes already forwarded from a router node
                     if len(details.forward_for) >= 0:
                         self.log.debug('SKIP! already forwarded')
                         return
@@ -149,16 +158,28 @@ class BridgeSession(ApplicationSession):
                     options=options,
                 )
 
-            sub = yield other.subscribe(on_event, uri, options=SubscribeOptions(details=True))
-            self._subs[sub_id]['sub'] = sub
+            try:
+                sub = yield other.subscribe(on_event, uri, options=SubscribeOptions(details=True))
+            except TransportLost:
+                self.log.debug(
+                    "on_subscription_create: could not forward-subscription '{}' as RLink is not connected".format(
+                        uri))
+                return
+
+            if sub_id not in self._subs:
+                self.log.info("subscription already gone: {uri}", uri=sub_details['uri'])
+                yield sub.unsubscribe()
+            else:
+                self._subs[sub_id]["sub"] = sub
 
             self.log.debug(
-                "created forwarding subscription: me={me} other={other} sub_id={sub_id} sub_details={sub_details} details={details}",
+                "created forwarding subscription: me={me} other={other} sub_id={sub_id} sub_details={sub_details} details={details} sub_session={sub_session}",
                 me=self._session_id,
                 other=other,
                 sub_id=sub_id,
                 sub_details=sub_details,
                 details=details,
+                sub_session=sub_session,
             )
 
         # listen to when a subscription is removed from the router
@@ -180,7 +201,13 @@ class BridgeSession(ApplicationSession):
 
             uri = sub_details['uri']
 
-            yield self._subs[sub_id]['sub'].unsubscribe()
+            sub = self._subs[sub_id]["sub"]
+            if sub is None:
+                # see above; we might have un-subscribed here before
+                # we got an answer from the other router
+                self.log.info("subscription has no 'sub'")
+            else:
+                yield sub.unsubscribe()
 
             del self._subs[sub_id]
 
@@ -189,17 +216,23 @@ class BridgeSession(ApplicationSession):
         @inlineCallbacks
         def forward_current_subs():
             # get current subscriptions on the router
-            #
             subs = yield self.call("wamp.subscription.list")
             for sub_id in subs['exact']:
                 sub = yield self.call("wamp.subscription.get", sub_id)
-
-                if not sub['uri'].startswith("wamp."):
-                    yield on_subscription_create(sub_id, sub)
+                assert sub["id"] == sub_id, "Logic error, subscription IDs don't match"
+                yield on_subscription_create(self._session_id, sub)
 
         @inlineCallbacks
         def on_remote_join(_session, _details):
             yield forward_current_subs()
+
+        def on_remote_leave(_session, _details):
+            # The remote session has ended, clear subscription records.
+            # Clearing this dictionary helps avoid the case where
+            # local procedures are not subscribed on the remote leg
+            # on reestablishment of remote session.
+            # See: https://github.com/crossbario/crossbar/issues/1909
+            self._subs = {}
 
         if self.IS_REMOTE_LEG:
             yield forward_current_subs()
@@ -207,6 +240,7 @@ class BridgeSession(ApplicationSession):
             # from the local leg, don't try to forward events on the
             # remote leg unless the remote session is established.
             other.on('join', on_remote_join)
+            other.on('leave', on_remote_leave)
 
         # listen to when new subscriptions are created on the local router
         yield self.subscribe(on_subscription_create,
@@ -238,7 +272,7 @@ class BridgeSession(ApplicationSession):
             The handler will then also register on the other router, and when receiving
             calls, re-issue those on this router.
 
-            :param reg_id:
+            :param reg_session:
             :param reg_details:
             :param details:
             :return:
@@ -246,15 +280,19 @@ class BridgeSession(ApplicationSession):
             if reg_details['uri'].startswith("wamp."):
                 return
 
-            if reg_details['id'] in self._regs:
-                # this should not happen actually, but not sure ..
+            reg_id = reg_details["id"]
+
+            if reg_id in self._regs and self._regs[reg_id]["reg"]:
+                # This will happen if, partway through the registration process, the RLink disconnects
                 self.log.error('on_registration_create: reg ID {reg_id} already in map {method}',
-                               reg_id=reg_details['id'],
+                               reg_id=reg_id,
                                method=hltype(BridgeSession._setup_invocation_forwarding))
                 return
 
-            self._regs[reg_details['id']] = reg_details
-            self._regs[reg_details['id']]['reg'] = None
+            reg_details_local = copy.deepcopy(reg_details)
+            if reg_id not in self._regs:
+                reg_details_local["reg"] = None
+                self._regs[reg_id] = reg_details_local
 
             uri = reg_details['uri']
             ERR_MSG = [None]
@@ -326,6 +364,10 @@ class BridgeSession(ApplicationSession):
                                                details_arg='details',
                                                invoke=reg_details.get('invoke', None),
                                            ))
+            except TransportLost:
+                self.log.debug(
+                    "on_registration_create: could not forward-register '{}' as RLink is not connected".format(uri))
+                return
             except Exception as e:
                 # FIXME: partially fixes https://github.com/crossbario/crossbar/issues/1894,
                 #  however we need to make sure this situation never happens.
@@ -340,17 +382,17 @@ class BridgeSession(ApplicationSession):
             # on the "other" router, *this* router may have already
             # un-registered. If that happened, our registration will
             # be gone, so we immediately un-register on the other side
-            if reg_details['id'] not in self._regs:
+            if reg_id not in self._regs:
                 self.log.info("registration already gone: {uri}", uri=reg_details['uri'])
                 yield reg.unregister()
             else:
-                self._regs[reg_details['id']]['reg'] = reg
+                self._regs[reg_id]['reg'] = reg
 
-            self.log.info(
+            self.log.debug(
                 "created forwarding registration: me={me} other={other} reg_id={reg_id} reg_details={reg_details} details={details} reg_session={reg_session}",
                 me=self._session_id,
                 other=other._session_id,
-                reg_id=reg_details['id'],
+                reg_id=reg_id,
                 reg_details=reg_details,
                 details=details,
                 reg_session=reg_session,
@@ -359,7 +401,7 @@ class BridgeSession(ApplicationSession):
         # called when a registration is removed from the local router
         @inlineCallbacks
         def on_registration_delete(session_id, reg_id, details=None):
-            self.log.info(
+            self.log.debug(
                 "Registration deleted: {me} {session} {reg_id} {details}",
                 me=self,
                 session=session_id,
@@ -369,7 +411,7 @@ class BridgeSession(ApplicationSession):
 
             reg_details = self._regs.get(reg_id, None)
             if not reg_details:
-                self.log.info("registration not tracked - huh??")
+                self.log.debug("registration not tracked - huh??")
                 return
 
             uri = reg_details['uri']
@@ -378,13 +420,13 @@ class BridgeSession(ApplicationSession):
             if reg is None:
                 # see above; we might have un-registered here before
                 # we got an answer from the other router
-                self.log.info("registration has no 'reg'")
+                self.log.debug("registration has no 'reg'")
             else:
                 yield reg.unregister()
 
             del self._regs[reg_id]
 
-            self.log.info("{other} unsubscribed from {uri}".format(other=other, uri=uri))
+            self.log.debug("{other} unregistered from {uri}".format(other=other, uri=uri))
 
         @inlineCallbacks
         def register_current():
@@ -514,25 +556,37 @@ class RLinkRemoteSession(BridgeSession):
 
     def __init__(self, config):
         BridgeSession.__init__(self, config)
-        self._subs = {}
-        self._rlink_manager = self.config.extra['rlink_manager']
 
+        # import here to resolve import dependency issues
+        from crossbar.worker.router import RouterController
+
+        self._subs = {}
+        self._rlink_manager: RLinkManager = self.config.extra['rlink_manager']
+        self._router_controller: RouterController = self._rlink_manager.controller
+
+    # FIXME: async? see below
     def onConnect(self):
-        self.log.debug('{klass}.onConnect()', klass=self.__class__.__name__)
+        self.log.info('{func}() ...', func=hltype(self.onConnect))
 
         authid = self.config.extra.get('authid', None)
         authrole = self.config.extra.get('authrole', None)
         authextra = self.config.extra.get('authextra', {})
+
+        # FIXME: use cryptosign-proxy
         authmethods = ['cryptosign']
 
-        def actually_join(public_key):
+        # use WorkerController.get_public_key to call node controller
+        # FIXME: the following does _not_ work with onConnect (?!)
+        # _public_key = await self._router_controller.get_public_key()
+
+        def actually_join(_public_key):
             authextra.update({
                 # forward the client pubkey: this allows us to omit authid as
                 # the router can identify us with the pubkey already
-                'pubkey': public_key,
+                'pubkey': _public_key,
 
                 # not yet implemented. a public key the router should provide
-                # a trustchain for it's public key. the trustroot can eg be
+                # a trustchain for its public key. the trustroot can eg be
                 # hard-coded in the client, or come from a command line option.
                 'trustroot': None,
 
@@ -547,12 +601,12 @@ class RLinkRemoteSession(BridgeSession):
             })
 
             self.log.info(
-                '{klass}.join(realm="{realm}", authmethods={authmethods}, authid="{authid}", authrole="{authrole}", authextra={authextra})',
-                klass=self.__class__.__name__,
-                realm=self.config.realm,
-                authmethods=authmethods,
-                authid=authid,
-                authrole=authrole,
+                '{func} joining with realm="{realm}", authmethods={authmethods}, authid="{authid}", authrole="{authrole}", authextra={authextra}',
+                func=hltype(self.onConnect),
+                realm=hlval(self.config.realm),
+                authmethods=hlval(authmethods),
+                authid=hlval(authid),
+                authrole=hlval(authrole),
                 authextra=authextra)
 
             self.join(self.config.realm,
@@ -563,23 +617,28 @@ class RLinkRemoteSession(BridgeSession):
 
         res = self._rlink_manager._controller.get_public_key()
         res.addCallback(actually_join)
+        self.log.info('{func}() done (res={res}).', func=hltype(self.onConnect), res=res)
+        return res
 
+    # FIXME: async? see below
     def onChallenge(self, challenge):
-        self.log.debug('{klass}.onChallenge(challenge={challenge})',
-                       klass=self.__class__.__name__,
-                       challenge=challenge)
+        self.log.debug('{func}(challenge={challenge})', func=hltype(self.onChallenge), challenge=challenge)
 
         if challenge.method == 'cryptosign':
             # alright, we've got a challenge from the router.
 
-            # not yet implemented. check the trustchain the router provided against
-            # our trustroot, and check the signature provided by the
-            # router for our previous challenge. if both are ok, everything
-            # is fine - the router is authentic wrt our trustroot.
-
             # sign the challenge with our private key.
-            signed_challenge = self._rlink_manager._controller.sign_challenge(
-                challenge, self._rlink_manager._controller._transport.get_channel_id())
+            channel_id_type = 'tls-unique'
+            channel_id_map = self._router_controller._transport.transport_details.channel_id
+            if channel_id_type in channel_id_map:
+                channel_id = channel_id_map[channel_id_type]
+            else:
+                channel_id = None
+                channel_id_type = None
+
+            # use WorkerController.get_public_key to call node controller
+            # FIXME: await?
+            signed_challenge = self._router_controller.sign_challenge(challenge, channel_id, channel_id_type)
 
             # send back the signed challenge for verification
             return signed_challenge
@@ -638,8 +697,12 @@ class RLinkRemoteSession(BridgeSession):
         for k, v in self._subs.items():
             if v['sub'].active:
                 yield v['sub'].unsubscribe()
-
         self._subs = {}
+
+        for k, v, in self._regs.items():
+            if v["reg"] and v["reg"].active:
+                yield v["reg"].unregister()
+        self._regs = {}
 
         self.config.extra['other']._tracker.connected = False
         self.log.warn(
@@ -657,9 +720,9 @@ class RLinkRemoteSession(BridgeSession):
 
 class RLink(object):
     def __init__(self, id, config, started=None, started_by=None, local=None, remote=None):
-        assert type(id) == str
+        assert isinstance(id, str)
         assert isinstance(config, RLinkConfig)
-        assert started is None or type(started) == int
+        assert started is None or isinstance(started, int)
         assert started_by is None or isinstance(started_by, RLinkConfig)
         assert local is None or isinstance(local, RLinkLocalSession)
         assert remote is None or isinstance(remote, RLinkLocalSession)
@@ -748,8 +811,8 @@ class RLinkConfig(object):
         :rtype: :class:`crossbar.edge.worker.rlink.RLinkConfig`
         """
         # assert isinstance(personality, Personality)
-        assert type(obj) == dict
-        assert id is None or type(id) == str
+        assert isinstance(obj, dict)
+        assert id is None or isinstance(id, str)
 
         if id:
             obj['id'] = id
@@ -771,7 +834,7 @@ class RLinkConfig(object):
         authid = obj.get('authid', None)
         exclude_authid = obj.get('exclude_authid', [])
         for aid in exclude_authid:
-            assert type(aid) == str
+            assert isinstance(aid, str)
         forward_local_events = obj.get('forward_local_events', True)
         forward_remote_events = obj.get('forward_remote_events', True)
         forward_local_invocations = obj.get('forward_local_invocations', True)
@@ -796,23 +859,34 @@ class RLinkConfig(object):
 
 
 class RLinkManager(object):
-
+    """
+    Router-to-router links manager.
+    """
     log = make_logger()
 
     def __init__(self, realm, controller):
         """
 
         :param realm: The (local) router realm this object is managing links for.
-        :type realm: :class:`crossbar.edge.worker.router.ExtRouterRealm`
+        :param controller: The router controller this rlink is running under.
         """
-        # assert isinstance(realm, ExtRouterRealm)
+        # import here to resolve import dependency issues
+        from crossbar.edge.worker.router import ExtRouterRealm
+        from crossbar.worker.router import RouterController
 
-        # ExtRouterRealm
-        self._realm = realm
-        self._controller = controller
+        self._realm: ExtRouterRealm = realm
+        self._controller: RouterController = controller
 
         # map: link_id -> RLink
-        self._links = {}
+        self._links: Dict[str, RLink] = {}
+
+    @property
+    def realm(self):
+        return self._realm
+
+    @property
+    def controller(self):
+        return self._controller
 
     def __getitem__(self, link_id):
         if link_id in self._links:
@@ -837,7 +911,7 @@ class RLinkManager(object):
 
     @inlineCallbacks
     def start_link(self, link_id, link_config, caller):
-        assert type(link_id) == str
+        assert isinstance(link_id, str)
         assert isinstance(link_config, RLinkConfig)
         assert isinstance(caller, SessionIdent)
 

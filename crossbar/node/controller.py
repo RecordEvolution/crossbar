@@ -1,6 +1,6 @@
 #####################################################################################
 #
-#  Copyright (c) Crossbar.io Technologies GmbH
+#  Copyright (c) typedef int GmbH
 #  SPDX-License-Identifier: EUPL-1.2
 #
 #####################################################################################
@@ -13,6 +13,7 @@ import binascii
 from datetime import datetime
 from shutil import which
 from collections import namedtuple
+from typing import Dict, Any
 
 import cbor2
 
@@ -23,13 +24,12 @@ from twisted.internet.error import ProcessExitedAlready
 from twisted.python.runtime import platform
 
 from autobahn.util import utcnow, utcstr
-from autobahn.wamp.cryptosign import format_challenge, sign_challenge
 from autobahn.wamp.exception import ApplicationError
-from autobahn.wamp.types import PublishOptions, ComponentConfig, Challenge
+from autobahn.wamp.types import PublishOptions, ComponentConfig, Challenge, CallDetails
 from autobahn import wamp
 
 import crossbar
-from crossbar._util import term_print, hl, hlid, hltype, class_name
+from crossbar._util import term_print, hl, hlid, hlval, hltype, class_name
 from crossbar.common.checkconfig import NODE_SHUTDOWN_ON_WORKER_EXIT, NODE_SHUTDOWN_ON_WORKER_EXIT_WITH_ERROR, NODE_SHUTDOWN_ON_LAST_WORKER_EXIT
 from crossbar.common.twisted.processutil import WorkerProcessEndpoint
 from crossbar.node.native import create_native_worker_client_factory
@@ -42,6 +42,7 @@ from crossbar.common.fswatcher import HAS_FS_WATCHER, FilesystemWatcher
 
 import txaio
 from txaio import make_logger, get_global_log_level
+
 txaio.use_twisted()
 from txaio import time_ns  # noqa
 
@@ -202,7 +203,8 @@ class NodeController(NativeProcess):
             'running_workers': len(self._workers),
             'workers_by_type': workers_by_type,
             'directory': self.cbdir,
-            'pubkey': self._node._node_key.public_key(),
+            'ethadr': self._node.secmod[0].address(binary=False),
+            'pubkey': self._node.secmod[1].public_key(binary=False),
         }
 
     @wamp.register(None)
@@ -301,7 +303,7 @@ class NodeController(NativeProcess):
         :returns: List of worker processes.
         :rtype: list[dict]
         """
-        assert filter_types is None or (type(filter_types) == list and type(ft) == str for ft in filter_types)
+        assert filter_types is None or (isinstance(filter_types, list) and isinstance(ft, str) for ft in filter_types)
 
         if filter_types:
             ft = set(filter_types)
@@ -350,7 +352,7 @@ class NodeController(NativeProcess):
         """
         Start a new worker process in the node.
         """
-        if type(worker_id) != str or worker_id in ['controller', '']:
+        if not isinstance(worker_id, str) or worker_id in ['controller', '']:
             raise Exception('invalid worker ID "{}"'.format(worker_id))
 
         self.log.info('Starting {worker_type}-worker "{worker_id}" .. {worker_klass}',
@@ -418,19 +420,71 @@ class NodeController(NativeProcess):
         return self._workers[worker_id].getlog(limit)
 
     @wamp.register(None)
-    def sign_challenge(self,
-                       challenge_method,
-                       challenge_extra,
-                       channel_id_raw,
-                       channel_id_type='tls-unique',
-                       details=None):
-        challenge = Challenge(challenge_method, challenge_extra)
-        data = format_challenge(challenge, channel_id_raw, channel_id_type)
-        return sign_challenge(data, self._node._node_key.sign)
+    def sign(self, data: bytes, details: CallDetails):
+        """
+
+        :param data:
+        :param details:
+        :return:
+        """
+        self.log.info(
+            '{func}: signing data of length {data_len} for realm="{realm}", '
+            'session={session}, authid="{authid}", authrole="{authrole}"',
+            data_len=hlval(len(data)),
+            realm=hlval(self.realm),
+            session=hlid(details.caller),
+            authid=hlid(details.caller_authid),
+            authrole=hlid(details.caller_authrole),
+            func=hltype(self.sign))
+
+        # key 1 is the WAMP-Cryptosign node key
+        return self._node.secmod[1].sign(data)
 
     @wamp.register(None)
-    def get_public_key(self, details=None):
-        return self._node._node_key.public_key()
+    def sign_challenge(self, challenge_method: str, challenge_extra: Dict[str, Any], channel_id_raw: bytes,
+                       channel_id_type: str, details: CallDetails):
+        """
+
+        :param challenge_method:
+        :param challenge_extra:
+        :param channel_id_raw:
+        :param channel_id_type:
+        :param details:
+        :return:
+        """
+        self.log.info(
+            '{func}: signing challenge "{challenge_method}" for realm="{realm}", '
+            'session={session}, authid="{authid}", authrole="{authrole}"',
+            challenge_method=hlval(len(challenge_method)),
+            realm=hlval(self.realm),
+            session=hlid(details.caller),
+            authid=hlid(details.caller_authid),
+            authrole=hlid(details.caller_authrole),
+            func=hltype(self.sign_challenge))
+
+        challenge = Challenge(challenge_method, challenge_extra)
+
+        # key 1 is the WAMP-Cryptosign node key
+        return self._node.secmod[1].sign_challenge(challenge, channel_id_raw, channel_id_type)
+
+    @wamp.register(None)
+    def get_public_key(self, details: CallDetails):
+        """
+
+        :param details:
+        :return:
+        """
+        self.log.info(
+            '{func}: return node public key for realm="{realm}", '
+            'session={session}, authid="{authid}", authrole="{authrole}"',
+            realm=hlval(self.realm),
+            session=hlid(details.caller),
+            authid=hlid(details.caller_authid),
+            authrole=hlid(details.caller_authrole),
+            func=hltype(self.get_public_key))
+
+        # key 1 is the WAMP-Cryptosign node key
+        return self._node.secmod[1].public_key(binary=False)
 
     def _start_native_worker(self, worker_type, worker_id, worker_options=None, details=None):
 

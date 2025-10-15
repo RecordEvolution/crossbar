@@ -1,6 +1,6 @@
 ###############################################################################
 #
-# Copyright (c) Crossbar.io Technologies GmbH. Licensed under EUPLv1.2.
+# Copyright (c) typedef int GmbH. Licensed under EUPLv1.2.
 #
 ###############################################################################
 
@@ -50,7 +50,7 @@ from autobahn.wamp.exception import TransportLost
 from autobahn.wamp import auth
 from autobahn.wamp.types import PublishOptions, RegisterOptions, CallOptions
 from autobahn.websocket.protocol import parse_url
-from autobahn.wamp.cryptosign import SigningKey
+from autobahn.wamp.cryptosign import CryptosignKey
 
 from .util import CtsSubprocessProtocol
 
@@ -221,11 +221,11 @@ def sequential_ids(prefix):
 
 def _create_signing_key():
     """
-    :returns: a new SigningKey instance and a hex encoding of the
+    :returns: a new CryptosignKey instance and a hex encoding of the
         private key data.
     """
     keydata = os.urandom(32)
-    sk = SigningKey.from_key_bytes(keydata)
+    sk = CryptosignKey.from_bytes(keydata)
     privkey_hex = sk._key.encode(encoder=encoding.HexEncoder).decode('ascii')
 
     return sk, privkey_hex
@@ -353,7 +353,7 @@ class LauncherProcessController(object):
             stdout=LogPrinter(), stderr=LogPrinter(),
         )
         keydata = os.urandom(32)
-        signing_key = SigningKey.from_key_bytes(keydata)
+        signing_key = CryptosignKey.from_bytes(keydata)
         probe_privkey_fname = path.join(self._workdir, "{}.privkey".format(probe_id))
         with open(probe_privkey_fname, 'wb') as f:
             f.write(keydata)
@@ -1195,12 +1195,16 @@ async def run_process(exe, args, env, publisher=stdout_publisher):
     return proto.exit_status
 
 
-async def create_virtualenv(python, env_dir, env, requirements, logging=True, just_update=False, progress=None):
+async def create_virtualenv(python, env_dir, env, requirements, logging=True, no_install=True, just_update=False, progress=None):
     """
     Create a new Python virtualenv at ``env_dir`` with the Python
     executable ``python``. Returns a Deferred, which callbacks with
     nothing (when "virtualenv" exits).
     """
+    if no_install:
+        print('Using Python "{}"'.format(python))
+        print('No new virtualenv to create (reusing "{}")'.format(env_dir))
+        return []
 
     def progress_publisher(_, data):
         progress_publisher.logs += data.decode('utf8')

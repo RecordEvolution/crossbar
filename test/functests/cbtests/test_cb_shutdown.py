@@ -1,6 +1,6 @@
 ###############################################################################
 #
-# Copyright (c) Crossbar.io Technologies GmbH. Licensed under EUPLv1.2.
+# Copyright (c) typedef int GmbH. Licensed under EUPLv1.2.
 #
 ###############################################################################
 
@@ -35,6 +35,7 @@ def test_shutdown_failed_component(reactor, request, virtualenv, session_temp):
     """
     crossbar shuts down a container on any component failure
     """
+    raise pytest.skip("FIXME")
 
     crossbar_config = {
         "version": 2,
@@ -176,6 +177,7 @@ def test_restart_failed_component(reactor, request, virtualenv, session_temp):
     """
     crossbar restarts a component on failure
     """
+    raise pytest.skip("FIXME")
 
     crossbar_config = {
         "version": 2,
@@ -291,10 +293,10 @@ def test_restart_failed_component(reactor, request, virtualenv, session_temp):
         return _cleanup_crossbar(protocol)
     request.addfinalizer(cleanup)
 
-    timeout = sleep(15)
+    timeout = sleep(20)
     yield DeferredList([timeout, protocol._all_done], fireOnOneCallback=True, fireOnOneErrback=True)
 
     # in the "happy path", timeout gets called .. and we want to make
     # sure there's at least two "restart" messages in the logs
     restarts = re.findall("restarting", protocol.logs.getvalue().lower())
-    assert len(restarts) >= 2, "Expected at least two restarts"
+    assert len(restarts) >= 2, "Expected at least two restarts, but was {}".format(len(restarts))

@@ -1,6 +1,6 @@
 #####################################################################################
 #
-#  Copyright (c) Crossbar.io Technologies GmbH
+#  Copyright (c) typedef int GmbH
 #  SPDX-License-Identifier: EUPL-1.2
 #
 #####################################################################################
@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from typing import Dict
 
 import txaio
+
 txaio.use_twisted()
 
 import crossbar
@@ -22,8 +23,10 @@ from crossbar.worker.container import ContainerController
 from crossbar.worker.testee import WebSocketTesteeController
 from crossbar.worker.proxy import ProxyController, ProxyWorkerProcess
 from crossbar.webservice import base
-from crossbar.webservice import wsgi, rest, longpoll, websocket, misc, static, archive, wap
-from crossbar.router.realmstore import MemoryRealmStore
+from crossbar.webservice import wsgi, rest, longpoll, websocket, misc, static, archive, wap, catalog
+from crossbar.interfaces import IRealmStore, IInventory
+from crossbar.router.realmstore import RealmStoreMemory
+from crossbar.router.inventory import Inventory
 
 
 def do_nothing(*args, **kw):
@@ -99,20 +102,8 @@ def default_native_workers():
     return factory
 
 
-def create_realm_store(personality, factory, config):
+def create_realm_store(personality, factory, config) -> IRealmStore:
     """
-
-    :param personality: Node personality
-    :type personality: :class:`crossbar.personality
-
-    :param factory: Router factory
-    :type factory: :class:`crossbar.router.router.RouterFactory`
-    :param config:
-    :return:
-    """
-    """
-    store = psn.create_realm_store(psn, self._node_id, self._worker, self, realm.config['store'])
-
     Factory for creating realm stores (which store call queues and event history).
 
     .. code-block:: json
@@ -136,6 +127,12 @@ def create_realm_store(personality, factory, config):
             ]
         }
 
+    :param personality: Node personality
+    :type personality: :class:`crossbar.personality
+
+    :param factory: Router factory
+    :type factory: :class:`crossbar.router.router.RouterFactory`
+
     :param config: Realm store configuration item.
     :type config: dict
     """
@@ -154,6 +151,59 @@ def create_realm_store(personality, factory, config):
     store = store_class(personality, factory, config)
 
     return store
+
+
+def create_realm_inventory(personality, factory, config) -> IInventory:
+    """
+
+    .. code-block:: json
+
+        {
+            "version": 2,
+            "workers": [
+                {
+                    "type": "router",
+                    "realms": [
+                        {
+                            "name": "realm1",
+                            "inventory": {
+                                "type": "wamp.eth",
+                                "catalogs": [
+                                    {
+                                        "name": "pydefi",
+                                        "filename": "../schema/trading.bfbs"
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+
+    :param personality: Node personality
+    :type personality: :class:`crossbar.personality`
+
+    :param factory: Router factory
+    :type factory: :class:`crossbar.router.router.RouterFactory`
+
+    :param config: FbsRepository configuration
+    :type config: dict, for example:
+        .. code-block:: json
+            {
+                "type": "wamp.eth",
+                "catalogs": [
+                    {
+                        "name": "pydefi",
+                        "filename": "../schema/trading.bfbs"
+                    }
+                ]
+            }
+
+    :return: A new realm inventory object.
+    """
+    inventory = Inventory.from_config(personality, factory, config)
+    return inventory
 
 
 _TITLE = "Crossbar.io"
@@ -196,9 +246,7 @@ class Personality(object):
                             build=crossbar.__build__,
                             year=time.strftime('%Y'))
 
-    LEGAL = ('crossbar', 'LEGAL')
     LICENSE = ('crossbar', 'LICENSE')
-    LICENSE_FOR_API = ('crossbar', 'LICENSE-FOR-API')
     LICENSES_OSS = ('crossbar', 'LICENSES-OSS')
 
     # a list of directories to serach Jinja2 templates for
@@ -225,11 +273,11 @@ class Personality(object):
         'webhook': checkconfig.check_web_path_service_webhook,
         'archive': archive.RouterWebServiceArchive.check,
         'wap': wap.RouterWebServiceWap.check,
+        'catalog': catalog.RouterWebServiceCatalog.check,
     }
 
     WEB_SERVICE_FACTORIES: Dict[str, object] = {
-        # renders to 404
-        'none': base.RouterWebService,
+        'none': base.RouterWebService,  # renders to 404
         'path': base.RouterWebServiceNestedPath,
         'redirect': base.RouterWebServiceRedirect,
         'resource': base.RouterWebServiceTwistedWeb,
@@ -247,11 +295,12 @@ class Personality(object):
         'webhook': rest.RouterWebServiceWebhook,
         'archive': archive.RouterWebServiceArchive,
         'wap': wap.RouterWebServiceWap,
+        'catalog': catalog.RouterWebServiceCatalog,
     }
 
     EXTRA_AUTH_METHODS: Dict[str, object] = {}
 
-    REALM_STORES: Dict[str, object] = {'memory': MemoryRealmStore}
+    REALM_STORES: Dict[str, object] = {'memory': RealmStoreMemory}
 
     Node = node.Node
     NodeOptions = node.NodeOptions
@@ -263,6 +312,8 @@ class Personality(object):
     create_router_transport = transport.create_router_transport
 
     create_realm_store = create_realm_store
+
+    create_realm_inventory = create_realm_inventory
 
     RouterWebTransport = transport.RouterWebTransport
 

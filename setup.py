@@ -1,6 +1,6 @@
 #####################################################################################
 #
-#  Copyright (c) Crossbar.io Technologies GmbH
+#  Copyright (c) typedef int GmbH
 #  SPDX-License-Identifier: EUPL-1.2
 #
 #####################################################################################
@@ -29,19 +29,14 @@ with open('crossbar/_version.py') as f:
 
 install_requires = []
 
-# https://mike.zwobble.org/2013/05/adding-git-or-hg-or-svn-dependencies-in-setup-py/
-dependency_links = []
+extras_require = {
+    'dev': []
+}
+with open('requirements-dev.txt') as f:
+    for line in f.read().splitlines():
+        extras_require['dev'].append(line.strip())
 
-if False:
-    extras_require = {}
-else:
-    extras_require = {
-        'dev': []
-    }
-    with open('requirements-dev.txt') as f:
-        for line in f.read().splitlines():
-            extras_require['dev'].append(line.strip())
-
+# with open('requirements-min.txt') as f:
 with open('requirements-latest.txt') as f:
     for line in f.read().splitlines():
         line = line.strip()
@@ -56,11 +51,9 @@ with open('requirements-latest.txt') as f:
             else:
                 name = parts[0]
                 # do NOT (!) touch this!
-                # https://mike.zwobble.org/2013/05/adding-git-or-hg-or-svn-dependencies-in-setup-py/
-                if name.startswith('git+'):
-                    dependency_links.append(name)
-                else:
-                    install_requires.append(name)
+                # {package-name}[flavor] @ git+https://github.com/{user|org}/{repository}.git@{tag}#egg={package-name}
+                # https://peps.python.org/pep-0508/
+                install_requires.append(name)
 
 # enforce use of CFFI for LMDB
 os.environ['LMDB_FORCE_CFFI'] = '1'
@@ -77,14 +70,17 @@ setup(
     version=__version__,
     description='Crossbar.io multi-protocol (WAMP/WebSocket, REST/HTTP, MQTT) application router for microservices.',
     long_description=long_description,
-    author='Crossbar.io Technologies GmbH',
+    author='typedef int GmbH',
     url='http://crossbar.io/',
     platforms=('Any'),
     license="European Union Public Licence 1.2 (EUPL 1.2)",
-    install_requires=install_requires,
 
-    # https://mike.zwobble.org/2013/05/adding-git-or-hg-or-svn-dependencies-in-setup-py/
-    dependency_links=dependency_links,
+    # unfortunately, dependencies refered directly or indirectly (!)
+    # from packages listed here will take precedence over packages
+    # refered to via "git+https" based package repository links
+    # regardless of which package version is newer!
+    # https://stackoverflow.com/questions/17366784/setuptools-unable-to-use-link-from-dependency-links
+    install_requires=install_requires,
 
     extras_require=extras_require,
     entry_points={
@@ -95,7 +91,8 @@ setup(
     },
     packages=find_packages(),
     include_package_data=True,
-    data_files=[('.', ['crossbar/LEGAL', 'crossbar/LICENSE', 'crossbar/LICENSE-FOR-API', 'crossbar/LICENSES-OSS', 'crossbar.ico'])],
+    data_files=[('.', ['crossbar/LICENSE', 'crossbar/LICENSES-OSS', 'crossbar.ico', 'requirements-dev.txt',
+                       'requirements-latest.txt', 'requirements-min.txt', 'requirements-pinned.txt', 'requirements.txt'])],
     zip_safe=False,
     python_requires='>=3.7',
 
@@ -111,6 +108,7 @@ setup(
                  "Programming Language :: Python :: 3.8",
                  "Programming Language :: Python :: 3.9",
                  "Programming Language :: Python :: 3.10",
+                 "Programming Language :: Python :: 3.11",
                  "Programming Language :: Python :: Implementation :: CPython",
                  "Programming Language :: Python :: Implementation :: PyPy",
                  "Topic :: Internet",

@@ -1,7 +1,7 @@
 ###############################################################################
 #
 # Crossbar.io Shell
-# Copyright (c) Crossbar.io Technologies GmbH. Licensed under EUPLv1.2.
+# Copyright (c) typedef int GmbH. Licensed under EUPLv1.2.
 #
 ###############################################################################
 
@@ -30,11 +30,12 @@ from autobahn.websocket.util import parse_url
 from autobahn.wamp.types import ComponentConfig
 from autobahn.wamp.exception import ApplicationError
 from autobahn.twisted.wamp import ApplicationRunner
+from autobahn.xbr import UserKey
 
 from crossbar.common.twisted.endpoint import _create_tls_client_context
 
 from crossbar.shell.util import (style_crossbar, style_finished_line, style_error, style_ok, localnow)
-from crossbar.shell import (client, config, userkey, __version__)
+from crossbar.shell import (client, config, __version__)
 
 if 'CROSSBAR_FABRIC_URL' in os.environ:
     _DEFAULT_CFC_URL = os.environ['CROSSBAR_FABRIC_URL']
@@ -199,7 +200,7 @@ class Application(object):
 
         privkey_path = os.path.join(cbf_dir, profile_obj.privkey or '{}.priv'.format(profile))  # noqa: W503
         pubkey_path = os.path.join(cbf_dir, profile_obj.pubkey or '{}.pub'.format(profile))  # noqa: W503
-        key_obj = userkey.UserKey(privkey_path, pubkey_path, yes_to_all=yes_to_all)
+        key_obj = UserKey(privkey_path, pubkey_path, yes_to_all=yes_to_all)
 
         return key_obj, profile_obj
 
@@ -270,7 +271,11 @@ class Application(object):
         cmd_str = ' '.join(["crossbar", "shell"] + sys.argv[1:])
         if self._output_format in [Application.OUTPUT_FORMAT_JSON, Application.OUTPUT_FORMAT_JSON_COLORED]:
 
-            json_str = json.dumps(result.result, separators=(', ', ': '), sort_keys=True, indent=4, ensure_ascii=False)
+            json_str = json.dumps(result.result,
+                                  separators=(', ', ': '),
+                                  sort_keys=False,
+                                  indent=4,
+                                  ensure_ascii=False)
 
             if self._output_format == Application.OUTPUT_FORMAT_JSON_COLORED:
                 console_str = highlight(json_str, lexers.JsonLexer(),
@@ -385,6 +390,8 @@ class Application(object):
         # realm, or a management realm the user has a role on)
         done = txaio.create_future()
 
+        url_is_secure, _, _, _, _, _ = parse_url(url)
+
         extra = {
             # these are forward on the actual client connection
             'authid': authid,
@@ -393,7 +400,10 @@ class Application(object):
             # these are native Python object and only used client-side
             'key': key.key,
             'done': done,
-            'command': command
+            'command': command,
+
+            # WAMP-cryptosign authentication: TLS channel binding
+            'channel_binding': 'tls-unique' if url_is_secure else None,
         }
 
         cert_options = None

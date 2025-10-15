@@ -1,7 +1,7 @@
 ###############################################################################
 #
 # Crossbar.io Shell
-# Copyright (c) Crossbar.io Technologies GmbH. Licensed under EUPLv1.2.
+# Copyright (c) typedef int GmbH. Licensed under EUPLv1.2.
 #
 ###############################################################################
 
@@ -17,6 +17,7 @@ from crossbar.shell.util import hl
 from crossbar.shell.reflection import Schema
 
 import txaio
+
 txaio.use_twisted()
 
 

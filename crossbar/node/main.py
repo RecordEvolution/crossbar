@@ -1,6 +1,6 @@
 #####################################################################################
 #
-#  Copyright (c) Crossbar.io Technologies GmbH
+#  Copyright (c) typedef int GmbH
 #  SPDX-License-Identifier: EUPL-1.2
 #
 #####################################################################################
@@ -16,6 +16,7 @@ import sys
 import pkg_resources
 
 import txaio
+
 txaio.use_twisted()  # noqa
 
 from txaio import make_logger, start_logging, set_global_log_level, failure_format_traceback
@@ -29,7 +30,7 @@ from crossbar._logging import make_logfile_observer
 from crossbar._logging import make_stdout_observer
 from crossbar._logging import make_stderr_observer
 from crossbar._logging import LogLevel
-from crossbar.common.key import _maybe_generate_key, _read_node_key, _read_release_key
+from crossbar.common.key import _maybe_generate_node_key, _read_node_key, _read_release_key
 
 from autobahn.websocket.protocol import WebSocketProtocol
 from autobahn.websocket.utf8validator import Utf8Validator
@@ -91,7 +92,7 @@ def _get_version(name_or_module):
 
     if type(v) in (tuple, list):
         return '.'.join(str(x) for x in v)
-    elif type(v) == str:
+    elif isinstance(v, str):
         return v
     else:
         raise RuntimeError('unexpected type {} for version in module "{}"'.format(type(v), name_or_module))
@@ -213,10 +214,7 @@ def _run_command_legal(options, reactor, personality, verbose=True):
     """
     Subcommand "crossbar legal".
     """
-    if verbose:
-        docs = [personality.LEGAL, personality.LICENSE, personality.LICENSE_FOR_API, personality.LICENSES_OSS]
-    else:
-        docs = [personality.LEGAL]
+    docs = [personality.LICENSE, personality.LICENSES_OSS]
 
     print(hl('*' * 120, bold=True, color='yellow'))
     for package, resource_name in docs:
@@ -504,7 +502,7 @@ def _run_command_keys(options, reactor, personality):
     log = make_logger()
 
     # Generate a new node key pair (2 files), load and check
-    _maybe_generate_key(options.cbdir)
+    _maybe_generate_node_key(options.cbdir)
 
     # Print keys
 
@@ -556,7 +554,7 @@ def _run_command_init(options, reactor, personality):
 
     get_started_hint = Templates.init(options.appdir, template='default')
 
-    _maybe_generate_key(cbdir)
+    _maybe_generate_node_key(cbdir)
 
     log.info("Application directory initialized")
 
@@ -813,7 +811,7 @@ def _run_command_start(options, reactor, personality):
 
     # possibly generate new node key
     #
-    if not node.is_key_loaded():
+    if node.secmod is None:
         node.load_keys(options.cbdir)
 
     # if vmprof global profiling is enabled via command line option, this will carry

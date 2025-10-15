@@ -1,6 +1,6 @@
 #####################################################################################
 #
-#  Copyright (c) Crossbar.io Technologies GmbH
+#  Copyright (c) typedef int GmbH
 #  SPDX-License-Identifier: EUPL-1.2
 #
 #####################################################################################
@@ -13,8 +13,8 @@ from twisted.internet.defer import succeed
 from txaio import make_logger
 
 from autobahn.wamp.exception import ApplicationError
-from autobahn.wamp.cryptosign import SigningKey
 from autobahn.wamp.types import CallOptions, ComponentConfig
+from autobahn.xbr._secmod import SecurityModuleMemory
 
 from crossbar._util import hltype, hlid, hluserid, hl
 
@@ -23,7 +23,7 @@ from crossbar.router.session import RouterSessionFactory
 from crossbar.router.service import RouterServiceAgent
 from crossbar.worker.types import RouterRealm
 from crossbar.common.checkconfig import NODE_SHUTDOWN_ON_WORKER_EXIT
-from crossbar.common.key import _maybe_generate_key
+from crossbar.common.key import _maybe_generate_node_key
 from crossbar.node.controller import NodeController
 
 
@@ -43,14 +43,14 @@ class Node(object):
 
     ROUTER_SERVICE = RouterServiceAgent
 
+    CONFIG_SOURCE_EMPTY = 0
     CONFIG_SOURCE_DEFAULT = 1
-    CONFIG_SOURCE_EMPTY = 2
-    CONFIG_SOURCE_LOCALFILE = 3
+    CONFIG_SOURCE_LOCALFILE = 2
     CONFIG_SOURCE_XBRNETWORK = 4
     CONFIG_SOURCE_TO_STR = {
+        0: 'empty',
         1: 'default',
-        2: 'empty',
-        3: 'localfile',
+        2: 'localfile',
         4: 'xbrnetwork',
     }
 
@@ -95,11 +95,15 @@ class Node(object):
         # the node controller realm
         self._realm = 'crossbar'
 
-        # config of this node.
+        # config of this node
         self._config = None
 
-        # node private key :class:`autobahn.wamp.cryptosign.SigningKey`
-        self._node_key = None
+        # source(s) of the config of this node
+        self._config_source = 0
+
+        # node security module autobahn.xbr._secmod.SecurityModuleMemory, this allows
+        # access to node private key :class:`autobahn.wamp.cryptosign.CryptosignKey`
+        self._node_secmod = None
 
         # when running in managed mode, this will hold the session to CFC
         self._manager = None
@@ -145,16 +149,16 @@ class Node(object):
         return self._realm
 
     @property
-    def key(self):
+    def secmod(self):
         """
-        Returns the node (private signing) key pair.
+        Returns the node security module, which provides access to node key signing.
 
-        :return: The node key.
-        :rtype: :class:`autobahn.wamp.cryptosign.SigningKey`
+        :return: The node security module.
+        :rtype: :class:`autobahn.xbr._secmod.SecurityModuleMemory`
         """
-        return self._node_key
+        return self._node_secmod
 
-    def load_keys(self, cbdir):
+    def load_keys(self, cbdir, privfile='key.priv', pubfile='key.pub'):
         """
         Load node public-private key pair from key files, possibly generating a new key pair if
         none exists.
@@ -163,7 +167,9 @@ class Node(object):
 
         IMPORTANT: this function is run _before_ start of Twisted reactor!
         """
-        was_new, self._node_key = _maybe_generate_key(cbdir)
+        assert self._node_secmod is None
+        was_new, _ = _maybe_generate_node_key(cbdir, privfile=privfile, pubfile=pubfile)
+        self._node_secmod = SecurityModuleMemory.from_keyfile(os.path.join(cbdir, privfile))
         return was_new
 
     def load_config(self, configfile=None, default=None):
@@ -200,18 +206,7 @@ class Node(object):
 
             self.personality.check_config(self.personality, self._config)
 
-        if 'controller' in self._config and 'keyring' in self._config['controller']:
-            keyring_type = self._config['controller']['keyring']['type']
-            if keyring_type == 'file':
-                key_path = self._config['controller']['keyring']['path']
-                self._node_key = SigningKey.from_raw_key(key_path)
-            else:
-                raise RuntimeError("NotImplemented: hsm authentication is currently not implemented.")
-
         return config_source, config_path
-
-    def is_key_loaded(self):
-        return self._node_key is not None
 
     def _add_global_roles(self):
         controller_role_config = {
@@ -373,6 +368,12 @@ class Node(object):
                       note=hl('Starting node ..', color='green', bold=True),
                       method=hltype(Node.start))
 
+        # open and unlock node security module
+        if not self._node_secmod.is_open:
+            yield self._node_secmod.open()
+        if self._node_secmod.is_locked:
+            yield self._node_secmod.unlock()
+
         # a configuration must have been loaded before
         if not self._config:
             self.log.warn('no node configuration set - will use empty node configuration!')
@@ -450,9 +451,13 @@ class Node(object):
         self._boot_complete = Deferred()
 
         # startup the node personality ..
-        self.log.info('{func}::NODE_BOOT_BEGIN', func=hltype(self.personality.Node.boot))
+        self.log.info('{func}::NODE_BOOT_BEGIN[node_id="{node_id}"]',
+                      node_id=hlid(self._node_id),
+                      func=hltype(self.personality.Node.boot))
         res = yield self.personality.Node.boot(self)
-        self.log.info('{func}::NODE_BOOT_COMPLETE', func=hltype(self.personality.Node.boot))
+        self.log.info('{func}::NODE_BOOT_COMPLETE[node_id="{node_id}"]',
+                      func=hltype(self.personality.Node.boot),
+                      node_id=hlid(self._node_id))
 
         # notify observers of boot completition
         self._boot_complete.callback(res)
@@ -875,7 +880,42 @@ class Node(object):
     def _configure_native_worker_proxy(self, worker_logname, worker_id, worker):
         yield self._configure_native_worker_common(worker_logname, worker_id, worker)
 
+        # set up backend connections on the proxy
+
+        for i, connection_name in enumerate(worker.get('connections', {})):
+            self.log.debug(
+                "Starting connection {index}: {name}",
+                index=i,
+                name=connection_name,
+            )
+            yield self._controller.call(
+                'crossbar.worker.{}.start_proxy_connection'.format(worker_id),
+                connection_name,
+                worker['connections'].get(connection_name, {}),
+            )
+
+        # set up realms and roles on the proxy
+
+        for i, realm_name in enumerate(worker.get('routes', {})):
+            roles = worker['routes'][realm_name]
+            for role_id, connections in roles.items():
+                if not isinstance(connections, list):
+                    connections = [connections]  # used to be a single string, now a list of strings
+                for connection_id in connections:
+                    self.log.debug(
+                        "Starting proxy realm route {realm}, {role} to {connection}",
+                        realm=realm_name,
+                        role=role_id,
+                        connection=connection_id,
+                    )
+                    yield self._controller.call(
+                        'crossbar.worker.{}.start_proxy_realm_route'.format(worker_id),
+                        realm_name,
+                        {role_id: connection_id},
+                    )
+
         # start transports on proxy
+
         for i, transport in enumerate(worker.get('transports', [])):
 
             if 'id' in transport:
@@ -942,37 +982,3 @@ class Node(object):
                 worker_logname=worker_logname,
                 transport_id=hlid(transport_id),
             )
-
-        # set up backend connections on the proxy
-
-        for i, connection_name in enumerate(worker.get('connections', {})):
-            self.log.debug(
-                "Starting connection {index}: {name}",
-                index=i,
-                name=connection_name,
-            )
-            yield self._controller.call(
-                'crossbar.worker.{}.start_proxy_connection'.format(worker_id),
-                connection_name,
-                worker['connections'].get(connection_name, {}),
-            )
-
-        # set up realms and roles on the proxy
-
-        for i, realm_name in enumerate(worker.get('routes', {})):
-            roles = worker['routes'][realm_name]
-            for role_id, connections in roles.items():
-                if not isinstance(connections, list):
-                    connections = [connections]  # used to be a single string, now a list of strings
-                for connection_id in connections:
-                    self.log.debug(
-                        "Starting proxy realm route {realm}, {role} to {connection}",
-                        realm=realm_name,
-                        role=role_id,
-                        connection=connection_id,
-                    )
-                    yield self._controller.call(
-                        'crossbar.worker.{}.start_proxy_realm_route'.format(worker_id),
-                        realm_name,
-                        {role_id: connection_id},
-                    )

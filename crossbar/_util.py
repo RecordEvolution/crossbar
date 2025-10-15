@@ -1,6 +1,6 @@
 #####################################################################################
 #
-#  Copyright (c) Crossbar.io Technologies GmbH
+#  Copyright (c) typedef int GmbH
 #  SPDX-License-Identifier: EUPL-1.2
 #
 #####################################################################################
@@ -84,7 +84,7 @@ def dump_json(obj, minified=True):
         return json.dumps(obj, separators=(',', ':'), ensure_ascii=False)
 
     else:
-        return json.dumps(obj, indent=4, separators=(',', ': '), sort_keys=True, ensure_ascii=False)
+        return json.dumps(obj, indent=4, separators=(',', ': '), sort_keys=False, ensure_ascii=False)
 
 
 def hl(text, bold=False, color='yellow'):
@@ -116,7 +116,7 @@ def hltype(obj, render=True):
 
 
 def hlflag(flag, true_txt='YES', false_txt='NO', null_txt='UNSET'):
-    assert flag is None or type(flag) == bool
+    assert flag is None or isinstance(flag, bool)
     if flag is None:
         return hl('{}'.format(null_txt), color='blue', bold=True)
     elif flag:

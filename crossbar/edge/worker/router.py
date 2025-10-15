@@ -60,31 +60,28 @@ class ExtRouter(Router):
             return True
         return False
 
-    def validate(self, payload_type, uri, args, kwargs):
-        # Do validation here
-        super().validate(payload_type, uri, args, kwargs)
-
 
 class ExtRouterFactory(RouterFactory):
     """
     Router factory extended with crossbar features.
     """
-    router = ExtRouter
+    router = ExtRouter  # type: ignore
 
     def __init__(self, node_id, worker, options=None):
         RouterFactory.__init__(self, node_id, worker, options=options)
+        assert isinstance(ExtRouter, Router)
+        self._routers: dict[str, ExtRouter] = {}
 
     def add_interface(self, realm, interface):
-        assert (type(realm) == six.text_type)
+        assert (isinstance(realm, six.text_type))
         assert (realm in self._routers)
 
-        router = self._routers[realm]
-
-        router.add_interface(RouterInterface(router, interface['uri']))
+        router_ = self._routers[realm]
+        router_.add_interface(RouterInterface(router_, interface['uri']))
 
     def drop_interface(self, realm, interface_id):
-        assert (type(realm) == six.text_type)
-        assert (type(interface_id) == six.text_type)
+        assert (isinstance(realm, six.text_type))
+        assert (isinstance(interface_id, six.text_type))
 
         if realm not in self._routers:
             raise Exception('no router started for realm "{}"'.format(realm))
@@ -207,8 +204,8 @@ class ExtRouterController(RouterController):
                       trace_id=trace_id,
                       trace_options=trace_options)
 
-        assert (trace_id is None or type(trace_id) == six.text_type)
-        assert (trace_options is None or type(trace_options) == dict)
+        assert (trace_id is None or isinstance(trace_id, six.text_type))
+        assert (trace_options is None or isinstance(trace_options, dict))
 
         trace_id = trace_id or self._next_trace_id()
         trace_options = trace_options or {}
@@ -223,7 +220,7 @@ class ExtRouterController(RouterController):
 
         # flag to control tracing of app _payload_
         trace_app_payload = trace_options.get(u'trace_app_payload', False)
-        if type(trace_app_payload) != bool:
+        if not isinstance(trace_app_payload, bool):
             emsg = 'invalid tracing options: trace_app_payload must be of type bool, was {}'.format(
                 type(trace_app_payload))
             self.log.error(emsg)
@@ -246,7 +243,7 @@ class ExtRouterController(RouterController):
 
         # flag to control tracing persistence
         persist = trace_options.get(u'persist', False)
-        if type(persist) != bool:
+        if not isinstance(persist, bool):
             emsg = 'invalid tracing options: persist must be of type bool, was {}'.format(type(persist))
             self.log.error(emsg)
             raise ApplicationError(u"crossbar.error.invalid_configuration", emsg)
