@@ -119,7 +119,7 @@ class WapResource(resource.Resource):
             if not session or not session.is_attached():
                 raise ApplicationError(
                     'crossbar.error.cannot_start',
-                    'could not attach service session for HTTP bridge (role "{}" on realm "{}")'.format(
+                    'could not attach service session for HTTP bridge (role "{}" on realm "{}") for WapResource'.format(
                         self._authrole, self._realm))
             assert session.realm == self._realm, 'service session: requested realm "{}", but got "{}"'.format(
                 self._realm, session.realm)

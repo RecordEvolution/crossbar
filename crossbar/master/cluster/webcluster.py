@@ -26,8 +26,9 @@ import txaio
 
 txaio.use_twisted()
 from txaio import time_ns, sleep, make_logger  # noqa
-from twisted.internet.defer import inlineCallbacks
+from twisted.internet.defer import inlineCallbacks, TimeoutError
 from twisted.internet.task import LoopingCall
+from twisted.internet import reactor as _reactor
 
 
 class WebClusterMonitor(object):
@@ -316,15 +317,54 @@ class WebClusterMonitor(object):
                                         # FIXME: this shouldn't be there (but should be cluster_oid)
                                         webservice_config.pop('webcluster_oid', None)
                                         try:
-                                            webservice_started = yield self._manager._session.call(
+                                            call_d = self._manager._session.call(
                                                 'crossbarfabriccenter.remote.proxy.start_web_transport_service',
                                                 node_oid, worker_id, transport_id, path, webservice_config)
+                                            
+                                            # Add client-side timeout to prevent monitor from hanging
+                                            call_d.addTimeout(30, _reactor)
+                                            
+                                            webservice_started = yield call_d
+                                            
                                             self.log.info(
                                                 '{func} Web service started on transport {transport_id} and path "{path}" [{webservice_started}]',
                                                 func=hltype(self._check_and_apply),
                                                 transport_id=hlid(transport_id),
                                                 path=hlval(path),
                                                 webservice_started=webservice_started)
+                                        except TimeoutError:
+                                            # Client-side timeout - proxy worker not responding
+                                            self.log.warn(
+                                                '{func} Timeout starting web service on path "{path}" for worker {worker_id} (node {node_oid}) - worker may not be ready yet, will retry',
+                                                func=hltype(self._check_and_apply),
+                                                path=hlval(path),
+                                                worker_id=hlid(worker_id),
+                                                node_oid=hlid(node_oid))
+                                            is_running_completely = False
+                                        except ApplicationError as e:
+                                            # Handle case where realm routes are not configured yet on proxy worker
+                                            # This can happen during node restart when ApplicationRealmMonitor hasn't
+                                            # configured routes yet. We log a warning and retry in next iteration.
+                                            if e.error == 'crossbar.error.no_such_object' and 'in configured routes' in str(e.args[0] if e.args else ''):
+                                                self.log.warn(
+                                                    '{func} Proxy worker realm routes not configured yet for path "{path}" - will retry: {error}',
+                                                    func=hltype(self._check_and_apply),
+                                                    path=hlval(path),
+                                                    error=str(e))
+                                                is_running_completely = False
+                                            elif e.error == 'crossbar.error.cannot_start' and 'could not attach service session' in str(e.args[0] if e.args else ''):
+                                                # Handle case where service session cannot be attached because realm/role not ready yet
+                                                # This happens when ApplicationRealmMonitor hasn't configured the realm on the proxy yet
+                                                self.log.warn(
+                                                    '{func} Cannot attach service session for path "{path}" - realm/role not ready yet, will retry: {error}',
+                                                    func=hltype(self._check_and_apply),
+                                                    path=hlval(path),
+                                                    error=str(e))
+                                                is_running_completely = False
+                                            else:
+                                                # Other errors should still be logged as failures
+                                                self.log.failure()
+                                                is_running_completely = False
                                         except:
                                             self.log.failure()
                                             is_running_completely = False

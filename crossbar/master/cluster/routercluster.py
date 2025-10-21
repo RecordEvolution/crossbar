@@ -128,6 +128,28 @@ class RouterClusterMonitor(object):
                                   status=hl(node.status if node else 'offline'))
                     is_running_completely = False
 
+            # Check for workergroups without placements and create them if nodes are available
+            # This handles the case where workergroups were created before nodes joined the cluster
+            if active_memberships:
+                with self._manager.db.begin(write=True) as txn:
+                    # Get all workergroups for this cluster
+                    workergroups = list(self._manager.schema.idx_workergroup_by_cluster.select(
+                        txn, from_key=(self._routercluster_oid, ''), return_keys=False))
+                    
+                    for wg_oid in workergroups:
+                        workergroup = self._manager.schema.router_workergroups[txn, wg_oid]
+                        
+                        # Create missing placements (function handles counting, node selection, and availability)
+                        created_placements = self._manager._create_missing_placements(
+                            txn, workergroup, session_nodes=self._manager._session.nodes)
+                        
+                        if created_placements:
+                            self.log.info(
+                                '{func} Created {count} placement(s) for workergroup {wg_name}',
+                                func=hltype(self._check_and_apply),
+                                count=hlval(len(created_placements)),
+                                wg_name=hlval(workergroup.name))
+
             if routercluster.status in [cluster.STATUS_STARTING] and is_running_completely:
                 with self._manager.db.begin(write=True) as txn:
                     routercluster = self._manager.schema.routerclusters[txn, self._routercluster_oid]
@@ -230,6 +252,134 @@ class RouterClusterManager(object):
         # router cluster monitors, containing a map, for every routercluster in state STARTING or RUNNING
         # with objects of class RouterClusterMonitor
         self._monitors = {}
+
+    def _create_worker_placement(self, txn, workergroup, routercluster_oid, node_oid, worker_name):
+        """
+        Create a single worker group placement on a specific node.
+        
+        This is a helper function used by _create_missing_placements.
+        
+        :param txn: Database transaction
+        :param workergroup: RouterWorkerGroup object
+        :param routercluster_oid: OID of the router cluster
+        :param node_oid: OID of the node on which to create the placement
+        :param worker_name: Name for the worker (e.g., "workergroup_realm1_1")
+        :return: Created RouterWorkerGroupClusterPlacement object
+        """
+        placement = RouterWorkerGroupClusterPlacement()
+        placement.oid = uuid.uuid4()
+        placement.worker_group_oid = workergroup.oid
+        placement.cluster_oid = routercluster_oid
+        placement.node_oid = node_oid
+        placement.worker_name = worker_name
+        placement.status = WorkerGroupStatus.STOPPED
+        placement.changed = time_ns()
+        placement.tcp_listening_port = 0
+        
+        self.schema.router_workergroup_placements[txn, placement.oid] = placement
+        
+        self.log.info(
+            'Created placement {worker_name} on node {node_oid} for workergroup {wg_name}',
+            worker_name=hlval(placement.worker_name),
+            node_oid=hlid(node_oid),
+            wg_name=hlval(workergroup.name))
+        
+        return placement
+
+    def _create_missing_placements(self, txn, workergroup, session_nodes=None):
+        """
+        Create missing worker placements for a workergroup, distributing them across available nodes.
+        
+        This function:
+        1. Counts existing placements for the workergroup
+        2. Determines how many placements are needed (workergroup.scale - existing)
+        3. Collects available online nodes with their current placement counts
+        4. Creates missing placements, distributing them evenly across nodes
+        
+        This implements the placement distribution strategy: placements are distributed
+        evenly across nodes by always selecting the node with the fewest current placements.
+        
+        This is used by both add_routercluster_workergroup (during initial workergroup creation)
+        and RouterClusterMonitor._check_and_apply (when creating placements for existing workergroups).
+        
+        :param txn: Database transaction
+        :param workergroup: RouterWorkerGroup object
+        :param session_nodes: Optional session.nodes dict for checking online status (used by monitor)
+        :return: List of created placement objects (empty list if no placements needed/possible)
+        """
+        # Count existing placements for this workergroup
+        existing_placements = list(self.schema.idx_clusterplacement_by_workername.select(
+            txn,
+            from_key=(workergroup.oid, uuid.UUID(bytes=b'\0' * 16), uuid.UUID(bytes=b'\0' * 16), ''),
+            to_key=(uuid.UUID(int=(int(workergroup.oid) + 1)), uuid.UUID(bytes=b'\0' * 16),
+                    uuid.UUID(bytes=b'\0' * 16), ''),
+            return_keys=False))
+        
+        placements_needed = workergroup.scale - len(existing_placements)
+        
+        # No placements needed
+        if placements_needed <= 0:
+            return []
+        
+        # Collect all nodes in the cluster with their current placement counts
+        nodes = SortedDict()
+        for _, node_oid in self.schema.routercluster_node_memberships.select(
+                txn,
+                from_key=(workergroup.cluster_oid, uuid.UUID(bytes=b'\0' * 16)),
+                to_key=(uuid.UUID(int=(int(workergroup.cluster_oid) + 1)), uuid.UUID(bytes=b'\0' * 16)),
+                return_values=False):
+            
+            # If session_nodes provided, only include online nodes
+            if session_nodes:
+                node_oid_str = str(node_oid)
+                node_obj = session_nodes.get(node_oid_str, None)
+                if not node_obj or node_obj.status != 'online':
+                    continue
+            
+            # Count existing placements on this node for this workergroup
+            node_placement_count = len(list(self.schema.idx_clusterplacement_by_workername.select(
+                txn,
+                from_key=(workergroup.oid, workergroup.cluster_oid, node_oid, ''),
+                to_key=(workergroup.oid, workergroup.cluster_oid, 
+                       uuid.UUID(int=(int(node_oid) + 1)), ''),
+                return_keys=False)))
+            nodes[node_oid] = node_placement_count
+        
+        # No nodes available
+        if not nodes:
+            self.log.warn(
+                'Cannot create placements for workergroup {wg_name} - no nodes available',
+                wg_name=hlval(workergroup.name))
+            return []
+        
+        # Create the missing placements
+        created_placements = []
+        next_worker_index = len(existing_placements) + 1
+        
+        for i in range(placements_needed):
+            # Select node with fewest placements (strategy: load balancing)
+            placement_node_oid, placement_node_cnt = nodes.peekitem(0)
+            
+            # Generate worker name
+            worker_name = '{}_{}'.format(workergroup.name, next_worker_index + i)
+            
+            # Create the placement
+            placement = self._create_worker_placement(
+                txn, workergroup, workergroup.cluster_oid, placement_node_oid, worker_name)
+            
+            created_placements.append(placement)
+            
+            # Update node count for next iteration
+            nodes[placement_node_oid] += 1
+        
+        self.log.info(
+            'Created {count} placement(s) for workergroup {wg_name} (now has {existing}/{scale} placements)',
+            count=hlval(len(created_placements)),
+            wg_name=hlval(workergroup.name),
+            existing=hlval(len(existing_placements) + len(created_placements)),
+            scale=hlval(workergroup.scale))
+        
+        return created_placements
 
     @inlineCallbacks
     def start(self, prefix):
@@ -947,7 +1097,45 @@ class RouterClusterManager(object):
                     'crossbar.error.no_such_object',
                     'no association between node {} and routercluster {} found'.format(node_oid_, routercluster_oid_))
 
+            # Delete the node membership from the cluster
             del self.schema.routercluster_node_memberships[txn, (routercluster_oid_, node_oid_)]
+
+            # CRITICAL FIX: Delete all worker placements for this node in all workergroups of this cluster
+            # This fixes the bug where stale placements prevent realms from redistributing when nodes rejoin
+            deleted_placements = 0
+
+            # Get all workergroups in this router cluster
+            for workergroup_oid in self.schema.idx_router_workergroups_by_cluster.select(
+                    txn,
+                    from_key=(routercluster_oid_, ),
+                    return_values=False):
+
+                # Find all placements for this workergroup on the node being removed
+                # idx_clusterplacement_by_workername: (workergroup_oid, cluster_oid, node_oid, worker_name) -> placement_oid
+                placement_oids_to_delete = []
+                for placement_oid in self.schema.idx_clusterplacement_by_workername.select(
+                        txn,
+                        from_key=(workergroup_oid, routercluster_oid_, node_oid_, ''),
+                        to_key=(workergroup_oid, routercluster_oid_, uuid.UUID(int=(int(node_oid_) + 1)), ''),
+                        return_keys=False):
+                    placement_oids_to_delete.append(placement_oid)
+
+                # Delete each placement
+                for placement_oid in placement_oids_to_delete:
+                    del self.schema.router_workergroup_placements[txn, placement_oid]
+                    deleted_placements += 1
+                    self.log.debug(
+                        'Deleted stale worker placement {placement_oid} for node {node_oid} in workergroup {workergroup_oid}',
+                        placement_oid=hlid(placement_oid),
+                        node_oid=hlid(node_oid_),
+                        workergroup_oid=hlid(workergroup_oid))
+
+            if deleted_placements > 0:
+                self.log.info(
+                    'Cleaned up {count} stale worker placement(s) for node {node_oid} being removed from router cluster {cluster_oid}',
+                    count=hlval(deleted_placements),
+                    node_oid=hlid(node_oid_),
+                    cluster_oid=hlid(routercluster_oid_))
 
         res_obj = membership.marshal()
         self.log.info('node removed from router cluster:\n{res_obj}', membership=res_obj)
@@ -1147,56 +1335,21 @@ class RouterClusterManager(object):
             self.log.info('New router worker group object stored in database:\n{workergroup}',
                           workergroup=pformat(workergroup_obj.marshal()))
 
-            # collect all node OIDs currently associated with the router cluster
-            # into a dict sorted by the current number of placements
-            nodes = SortedDict()
-            for _, node_oid in self.schema.routercluster_node_memberships.select(
-                    txn,
-                    from_key=(routercluster_oid_, uuid.UUID(bytes=b'\0' * 16)),
-                    to_key=(uuid.UUID(int=(int(routercluster_oid_) + 1)), uuid.UUID(bytes=b'\0' * 16)),
-                    return_values=False):
-
-                # count current number of placements associated with given node
-                cnt = 0
-                for _ in self.schema.idx_workergroup_by_placement.select(
-                        txn,
-                        from_key=(workergroup_obj.cluster_oid, node_oid, uuid.UUID(bytes=b'\0' * 16)),
-                        to_key=(workergroup_obj.cluster_oid, uuid.UUID(int=(int(node_oid) + 1)),
-                                uuid.UUID(bytes=b'\0' * 16)),
-                        return_keys=False):
-                    cnt += 1
-
-                # the dict is sorted ascending by cnt, that is nodes.peekitem(0)
-                # will be a node with the smallest current number of placements
-                nodes[node_oid] = cnt
-
-            # create and store workergroup worker placements on nodes for the new workergroup
-            for i in range(workergroup_obj.scale):
-                # new placement on a node with smallest number of current placements
-                placement_node_oid, placement_node_cnt = nodes.peekitem(0)
-
+            # Create and store workergroup worker placements on nodes for the new workergroup
+            # NOTE: If no nodes are in the cluster yet, we skip creating placements here.
+            # The monitor will automatically create placements when nodes join the cluster later.
+            created_placements = self._create_missing_placements(txn, workergroup_obj)
+            
+            if created_placements:
                 self.log.info(
-                    'Router worker placement selected node {placement_node_oid} with current worker count {placement_node_cnt}',
-                    placement_node_oid=hlid(placement_node_oid),
-                    placement_node_cnt=hlval(placement_node_cnt))
-
-                placement = RouterWorkerGroupClusterPlacement()
-                placement.oid = uuid.uuid4()
-                placement.worker_group_oid = workergroup_obj.oid
-                placement.cluster_oid = routercluster_oid_
-                placement.node_oid = placement_node_oid
-                placement.worker_name = '{}_{}'.format(workergroup_obj.name, i + 1)
-                placement.status = WorkerGroupStatus.STOPPED
-                placement.changed = time_ns()
-                placement.tcp_listening_port = 0
-
-                self.schema.router_workergroup_placements[txn, placement.oid] = placement
-
-                # keep track of new placement in our sorted dict
-                nodes[placement_node_oid] += 1
-
-                self.log.info('New router worker group placement object stored in database:\n{placement}',
-                              placement=pformat(placement.marshal()))
+                    'Created {count} worker placement(s) for new workergroup {workergroup_name}',
+                    count=hlval(len(created_placements)),
+                    workergroup_name=hlval(workergroup_obj.name))
+            else:
+                self.log.warn(
+                    'No nodes currently in router cluster {routercluster_oid} - placements for workergroup {workergroup_name} will be created automatically when nodes join',
+                    routercluster_oid=hlid(routercluster_oid_),
+                    workergroup_name=hlval(workergroup_obj.name))
 
         res_obj = workergroup_obj.marshal()
 
@@ -1277,7 +1430,35 @@ class RouterClusterManager(object):
                                        'no workergroup with oid {} found'.format(workergroup_oid_))
 
             # FIXME: check that the worker group has no running application realms
-            # FIXME: remove all router worker group placements from self.schema.router_workergroup_placements
+
+            # CRITICAL FIX: Delete all worker placements for this workergroup
+            # This fixes the bug where stale placements remain when workergroups are deleted
+            deleted_placements = 0
+
+            # Find all placements for this workergroup
+            # idx_clusterplacement_by_workername: (workergroup_oid, cluster_oid, node_oid, worker_name) -> placement_oid
+            placement_oids_to_delete = []
+            for placement_oid in self.schema.idx_clusterplacement_by_workername.select(
+                    txn,
+                    from_key=(workergroup_oid_, uuid.UUID(bytes=b'\0' * 16), uuid.UUID(bytes=b'\0' * 16), ''),
+                    to_key=(uuid.UUID(int=(int(workergroup_oid_) + 1)), uuid.UUID(bytes=b'\0' * 16), uuid.UUID(bytes=b'\0' * 16), ''),
+                    return_keys=False):
+                placement_oids_to_delete.append(placement_oid)
+
+            # Delete each placement
+            for placement_oid in placement_oids_to_delete:
+                del self.schema.router_workergroup_placements[txn, placement_oid]
+                deleted_placements += 1
+                self.log.debug(
+                    'Deleted worker placement {placement_oid} for workergroup {workergroup_oid}',
+                    placement_oid=hlid(placement_oid),
+                    workergroup_oid=hlid(workergroup_oid_))
+
+            if deleted_placements > 0:
+                self.log.info(
+                    'Cleaned up {count} worker placement(s) for workergroup {workergroup_oid} being removed',
+                    count=hlval(deleted_placements),
+                    workergroup_oid=hlid(workergroup_oid_))
 
             del self.schema.router_workergroups[txn, workergroup_oid_]
 

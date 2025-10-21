@@ -1,7 +1,7 @@
 # This Dockerfile is for development purposes only.
 # It can be used to quickly setup a dev environment on a local laptop.
 
-FROM python
+FROM python:3.14-slim-trixie
 
 RUN apt update && DEBIAN_FRONTEND=noninteractive apt install -y \
     git \
@@ -11,9 +11,9 @@ RUN apt update && DEBIAN_FRONTEND=noninteractive apt install -y \
     libunwind-dev
 
 
-RUN pip install git+https://github.com/vmprof/vmprof-python
+# RUN pip install git+https://github.com/vmprof/vmprof-python
 
-RUN git clone https://github.com/crossbario/crossbar.git
+RUN git clone --depth=1 https://github.com/crossbario/crossbar.git
 
 WORKDIR /crossbar
 

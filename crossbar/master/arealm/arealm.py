@@ -26,7 +26,8 @@ import txaio
 
 txaio.use_twisted()
 from txaio import time_ns, sleep, make_logger  # noqa
-from twisted.internet.defer import inlineCallbacks, returnValue
+from twisted.internet import reactor as _reactor
+from twisted.internet.defer import inlineCallbacks, returnValue, TimeoutError
 from twisted.internet.task import LoopingCall
 
 
@@ -203,6 +204,16 @@ class ApplicationRealmMonitor(object):
                                                                  placement_nodes)
             if not success:
                 is_running_completely = False
+            
+            # Update transport principals to include any new webcluster nodes that have come online
+            # This must happen after routers are started but before proxy connections are established
+            if arealm.webcluster_oid:
+                success = yield self._update_transport_principals(arealm, workergroup_placements, placement_nodes)
+                if not success:
+                    self.log.warn(
+                        '{func} Failed to update transport principals for webcluster nodes - proxy authentication may fail',
+                        func=hltype(self._check_and_apply))
+                    is_running_completely = False
         else:
             self.log.warn(
                 '{func} no placements configured for router cluster worker group {workergroup_oid} and arealm {arealm_oid}!',
@@ -214,6 +225,12 @@ class ApplicationRealmMonitor(object):
         # if the application realm has a (frontend) webcluster assigned (to accept incoming client
         # connections), setup proxy backend connections and routes to the router workers in the
         # router worker group of the application realm
+        self.log.info('{func} Checking webcluster setup: arealm={arealm}, webcluster_oid={webcluster_oid}, placements={placements}',
+                      func=hltype(self._check_and_apply),
+                      arealm=bool(arealm),
+                      webcluster_oid=hlid(arealm.webcluster_oid) if arealm and arealm.webcluster_oid else None,
+                      placements=len(workergroup_placements) if workergroup_placements else 0)
+        
         if arealm and arealm.webcluster_oid and workergroup_placements:
             # get list of nodes/workers for the webcluster, eg:
             #
@@ -224,16 +241,26 @@ class ApplicationRealmMonitor(object):
             #
             wc_workers = self._manager._session._webcluster_manager.get_webcluster_workers(arealm.webcluster_oid,
                                                                                            filter_online=True)
-            self.log.debug('{func} Ok, found {cnt_workers} running web cluster workers ..',
-                           func=hltype(self._check_and_apply),
-                           cnt_workers=len(wc_workers) if wc_workers else 0)
+            self.log.info('{func} Ok, found {cnt_workers} running web cluster workers for webcluster_oid={webcluster_oid}',
+                          func=hltype(self._check_and_apply),
+                          cnt_workers=len(wc_workers) if wc_workers else 0,
+                          webcluster_oid=hlid(arealm.webcluster_oid))
 
             # on each webcluster worker, setup backend connections and routes to all router workers of
             # the router worker group of this application realm
             for wc_node_oid, wc_worker_id in wc_workers:
-                success = yield self._apply_webcluster_connections(wc_node_oid, wc_worker_id, workergroup_placements,
-                                                                   placement_nodes, arealm)
-                if not success:
+                try:
+                    success = yield self._apply_webcluster_connections(wc_node_oid, wc_worker_id, workergroup_placements,
+                                                                       placement_nodes, arealm)
+                    if not success:
+                        is_running_completely = False
+                except Exception as e:
+                    # Catch any unexpected exceptions to prevent crashing the monitor loop
+                    self.log.failure(
+                        '{func} Unexpected error applying webcluster connections for worker {wc_worker_id} on node {wc_node_oid} - will retry in next iteration',
+                        func=hltype(self._check_and_apply),
+                        wc_worker_id=hlid(wc_worker_id),
+                        wc_node_oid=hlid(wc_node_oid))
                     is_running_completely = False
         else:
             self.log.warn('{func} application realm in status {status}, but no web cluster associated!',
@@ -308,24 +335,118 @@ class ApplicationRealmMonitor(object):
                     'crossbarfabriccenter.remote.proxy.get_proxy_connection', str(wc_node_oid), wc_worker_id,
                     connection_id)
             except ApplicationError as e:
-                if e.error != 'crossbar.error.no_such_object':
-                    # anything but "no_such_object" is unexpected (and fatal)
+                if e.error not in ['crossbar.error.no_such_object', 'wamp.error.no_such_procedure']:
+                    # anything but "no_such_object" or "no_such_procedure" (worker not ready) is unexpected (and fatal)
                     raise
                 is_running_completely = False
                 connection = None
-                self.log.warn(
-                    '{func} No connection {connection_id} currently running for web cluster (proxy) worker {wc_worker_id} on node {wc_node_oid}: starting backend connection ..',
-                    func=hltype(self._apply_webcluster_connections),
-                    wc_node_oid=hlid(wc_node_oid),
-                    wc_worker_id=hlid(wc_worker_id),
-                    connection_id=hlid(connection_id))
+                if e.error == 'wamp.error.no_such_procedure':
+                    self.log.info(
+                        '{func} Proxy worker {wc_worker_id} on node {wc_node_oid} not ready yet (will retry) ..',
+                        func=hltype(self._apply_webcluster_connections),
+                        wc_node_oid=hlid(wc_node_oid),
+                        wc_worker_id=hlid(wc_worker_id))
+                else:
+                    self.log.warn(
+                        '{func} No connection {connection_id} currently running for web cluster (proxy) worker {wc_worker_id} on node {wc_node_oid}: starting backend connection ..',
+                        func=hltype(self._apply_webcluster_connections),
+                        wc_node_oid=hlid(wc_node_oid),
+                        wc_worker_id=hlid(wc_worker_id),
+                        connection_id=hlid(connection_id))
             else:
-                self.log.debug(
-                    '{func} Ok, connection {connection_id} already running on web cluster (proxy) worker {wc_worker_id} on node {wc_node_oid}',
-                    func=hltype(self._apply_webcluster_connections),
-                    wc_node_oid=hlid(wc_node_oid),
-                    wc_worker_id=hlid(wc_worker_id),
-                    connection_id=hlid(connection_id))
+                # Connection object exists, but verify it's actually in a healthy state
+                connection_state = connection.get('state', 0)
+                connection_stopped = connection.get('stopped', None)
+                
+                # STATE_STARTED = 3, STATE_FAILED = 4, STATE_STOPPED = 6
+                if connection_state == 4 or connection_state == 6 or connection_stopped is not None:
+                    # Connection failed or stopped - need to restart it
+                    self.log.warn(
+                        '{func} Proxy backend connection {connection_id} on worker {wc_worker_id} is in unhealthy state '
+                        '(state={state}, stopped={stopped}) - will restart connection',
+                        func=hltype(self._apply_webcluster_connections),
+                        connection_id=hlid(connection_id),
+                        wc_worker_id=hlid(wc_worker_id),
+                        state=connection_state,
+                        stopped=connection_stopped)
+                    
+                    # Stop and remove the failed connection
+                    try:
+                        yield self._manager._session.call(
+                            'crossbarfabriccenter.remote.proxy.stop_proxy_connection',
+                            str(wc_node_oid), wc_worker_id, connection_id)
+                    except Exception as e:
+                        self.log.warn(
+                            '{func} Failed to stop unhealthy connection {connection_id}: {error}',
+                            func=hltype(self._apply_webcluster_connections),
+                            connection_id=hlid(connection_id),
+                            error=e)
+                    
+                    # Mark connection as None so it will be recreated below
+                    connection = None
+                    is_running_completely = False
+                elif connection_state == 3:
+                    # Connection is in STARTED state - verify routes actually exist
+                    # This catches the race condition where transport starts before routes are ready
+                    realm_name = arealm.name
+                    try:
+                        list_d = self._manager._session.call(
+                            'crossbarfabriccenter.remote.proxy.list_proxy_realm_routes', str(wc_node_oid), wc_worker_id,
+                            realm_name)
+                        list_d.addTimeout(10, _reactor)
+                        existing_routes = yield list_d
+                        
+                        if not existing_routes:
+                            # Connection exists but no routes! Need to recreate
+                            self.log.warn(
+                                '{func} Proxy backend connection {connection_id} exists but has NO ROUTES for realm "{realm_name}" - will recreate connection',
+                                func=hltype(self._apply_webcluster_connections),
+                                connection_id=hlid(connection_id),
+                                realm_name=hlval(realm_name))
+                            
+                            try:
+                                yield self._manager._session.call(
+                                    'crossbarfabriccenter.remote.proxy.stop_proxy_connection',
+                                    str(wc_node_oid), wc_worker_id, connection_id)
+                            except Exception as e:
+                                self.log.warn(
+                                    '{func} Failed to stop routeless connection {connection_id}: {error}',
+                                    func=hltype(self._apply_webcluster_connections),
+                                    connection_id=hlid(connection_id),
+                                    error=e)
+                            
+                            connection = None
+                            is_running_completely = False
+                        else:
+                            self.log.debug(
+                                '{func} Ok, connection {connection_id} already running on web cluster (proxy) worker {wc_worker_id} on node {wc_node_oid} (state={state}, routes={route_count})',
+                                func=hltype(self._apply_webcluster_connections),
+                                wc_node_oid=hlid(wc_node_oid),
+                                wc_worker_id=hlid(wc_worker_id),
+                                connection_id=hlid(connection_id),
+                                state=connection_state,
+                                route_count=len(existing_routes))
+                    except TimeoutError:
+                        self.log.warn(
+                            '{func} Timeout checking routes for connection {connection_id} - will retry next cycle',
+                            func=hltype(self._apply_webcluster_connections),
+                            connection_id=hlid(connection_id))
+                        is_running_completely = False
+                    except Exception as e:
+                        self.log.warn(
+                            '{func} Error checking routes for connection {connection_id}: {error} - assuming unhealthy',
+                            func=hltype(self._apply_webcluster_connections),
+                            connection_id=hlid(connection_id),
+                            error=e)
+                        is_running_completely = False
+                else:
+                    self.log.debug(
+                        '{func} Ok, connection {connection_id} already running on web cluster (proxy) worker {wc_worker_id} on node {wc_node_oid} (state={state})',
+                        func=hltype(self._apply_webcluster_connections),
+                        wc_node_oid=hlid(wc_node_oid),
+                        wc_worker_id=hlid(wc_worker_id),
+                        connection_id=hlid(connection_id),
+                        state=connection_state)
 
             # if no connection is running, and if the target placement has a TCP port configured,
             # start a new connection on the proxy worker
@@ -356,13 +477,41 @@ class ApplicationRealmMonitor(object):
                         }
                     }
                 }
-                connection = yield self._manager._session.call(
-                    'crossbarfabriccenter.remote.proxy.start_proxy_connection', str(wc_node_oid), wc_worker_id,
-                    connection_id, config)
+                try:
+                    call_d = self._manager._session.call(
+                        'crossbarfabriccenter.remote.proxy.start_proxy_connection', str(wc_node_oid), wc_worker_id,
+                        connection_id, config)
+                    
+                    # Add client-side timeout
+                    call_d.addTimeout(30, _reactor)
+                    
+                    connection = yield call_d
 
-                self.log.info('{func} Proxy backend connection started:\n{connection}',
-                              func=hltype(self._apply_webcluster_connections),
-                              connection=connection)
+                    self.log.info('{func} Proxy backend connection started:\n{connection}',
+                                  func=hltype(self._apply_webcluster_connections),
+                                  connection=connection)
+                except TimeoutError:
+                    self.log.warn(
+                        '{func} Timeout starting proxy backend connection {connection_id} on worker {wc_worker_id} (node {wc_node_oid}) - worker may not be ready yet, will retry',
+                        func=hltype(self._apply_webcluster_connections),
+                        connection_id=hlid(connection_id),
+                        wc_worker_id=hlid(wc_worker_id),
+                        wc_node_oid=hlid(wc_node_oid))
+                    is_running_completely = False
+                    connection = None
+                except ApplicationError as e:
+                    if e.error == 'crossbar.error.already_running':
+                        # Connection already exists - retrieve it instead
+                        self.log.debug(
+                            '{func} Proxy backend connection {connection_id} already running on {wc_worker_id} - retrieving existing connection',
+                            func=hltype(self._apply_webcluster_connections),
+                            connection_id=hlid(connection_id),
+                            wc_worker_id=hlid(wc_worker_id))
+                        connection = yield self._manager._session.call(
+                            'crossbarfabriccenter.remote.proxy.get_proxy_connection', str(wc_node_oid), wc_worker_id,
+                            connection_id)
+                    else:
+                        raise
 
             # if by now we do have a connection on the proxy worker, setup all routes (for the arealm)
             # using the connection
@@ -375,27 +524,59 @@ class ApplicationRealmMonitor(object):
                 routes = []
 
                 try:
-                    routes = yield self._manager._session.call(
+                    list_d = self._manager._session.call(
                         'crossbarfabriccenter.remote.proxy.list_proxy_realm_routes', str(wc_node_oid), wc_worker_id,
                         realm_name)
-                except ApplicationError as e:
-                    if e.error != 'crossbar.error.no_such_object':
-                        # anything but "no_such_object" is unexpected (and fatal)
-                        raise
+                    
+                    # Add client-side timeout
+                    list_d.addTimeout(10, _reactor)
+                    
+                    routes = yield list_d
+                except TimeoutError:
+                    # Client-side timeout
                     is_running_completely = False
                     self.log.warn(
-                        '{func} No route for realm "{realm_name}" currently running for web cluster (proxy) worker {wc_worker_id} on node {wc_node_oid}: starting backend route ..',
+                        '{func} Client-side timeout listing routes on proxy worker {wc_worker_id} (node {wc_node_oid}) for realm "{realm_name}" - worker may not be ready yet, will retry',
                         func=hltype(self._apply_webcluster_connections),
                         wc_node_oid=hlid(wc_node_oid),
                         wc_worker_id=hlid(wc_worker_id),
                         realm_name=hlval(realm_name))
+                except ApplicationError as e:
+                    if e.error not in ['crossbar.error.no_such_object', 'wamp.error.no_such_procedure']:
+                        # anything but "no_such_object" or "no_such_procedure" (worker not ready) is unexpected (and fatal)
+                        raise
+                    is_running_completely = False
+                    if e.error == 'wamp.error.no_such_procedure':
+                        self.log.info(
+                            '{func} Proxy worker {wc_worker_id} on node {wc_node_oid} not ready yet for route check (will retry) ..',
+                            func=hltype(self._apply_webcluster_connections),
+                            wc_node_oid=hlid(wc_node_oid),
+                            wc_worker_id=hlid(wc_worker_id))
+                    else:
+                        self.log.warn(
+                            '{func} No route for realm "{realm_name}" currently running for web cluster (proxy) worker {wc_worker_id} on node {wc_node_oid}: will create routes ..',
+                            func=hltype(self._apply_webcluster_connections),
+                            wc_node_oid=hlid(wc_node_oid),
+                            wc_worker_id=hlid(wc_worker_id),
+                            realm_name=hlval(realm_name))
+                    # Ensure routes is empty list to trigger route creation below
+                    routes = []
                 else:
-                    self.log.debug(
-                        '{func} Ok, route for realm "{realm_name}" already running on web cluster (proxy) worker {wc_worker_id} on node {wc_node_oid}',
-                        func=hltype(self._apply_webcluster_connections),
-                        wc_node_oid=hlid(wc_node_oid),
-                        wc_worker_id=hlid(wc_worker_id),
-                        realm_name=hlval(realm_name))
+                    # Successfully listed routes - but check if list is empty (proxy restart case)
+                    if not routes:
+                        self.log.warn(
+                            '{func} Proxy worker {wc_worker_id} on node {wc_node_oid} has NO routes configured for realm "{realm_name}" - will create routes ..',
+                            func=hltype(self._apply_webcluster_connections),
+                            wc_node_oid=hlid(wc_node_oid),
+                            wc_worker_id=hlid(wc_worker_id),
+                            realm_name=hlval(realm_name))
+                    else:
+                        self.log.debug(
+                            '{func} Ok, route for realm "{realm_name}" already running on web cluster (proxy) worker {wc_worker_id} on node {wc_node_oid}',
+                            func=hltype(self._apply_webcluster_connections),
+                            wc_node_oid=hlid(wc_node_oid),
+                            wc_worker_id=hlid(wc_worker_id),
+                            realm_name=hlval(realm_name))
 
                 if (not routes or len(routes) != len(workergroup_placements)):
                     new_routes, _is_running_completely = yield self._apply_webcluster_routes(
@@ -408,6 +589,16 @@ class ApplicationRealmMonitor(object):
                     routes.extend(new_routes)
                     if is_running_completely:
                         is_running_completely = _is_running_completely
+                    
+                    # Log when routes are successfully configured for this realm
+                    if new_routes:
+                        self.log.info(
+                            '{func} Proxy routes now configured for realm "{realm_name}" on worker {wc_worker_id} - '
+                            'clients can now connect to this realm ({num_routes} routes active)',
+                            func=hltype(self._apply_webcluster_connections),
+                            realm_name=hlval(realm_name),
+                            wc_worker_id=hlid(wc_worker_id),
+                            num_routes=len(routes))
 
         return is_running_completely
 
@@ -458,6 +649,14 @@ class ApplicationRealmMonitor(object):
 
             # existing = any(route['config'].get(role.name, None) == connection_id for route in routes)
 
+            self.log.info(
+                '{func} Starting proxy route on node={node_oid} worker={worker_id} for realm="{realm}" with config:\n{config}',
+                func=hltype(self._apply_webcluster_routes),
+                node_oid=wc_node_oid,
+                worker_id=wc_worker_id,
+                realm=realm_name,
+                config=pformat(config))
+
             try:
                 route = yield self._manager._session.call('crossbarfabriccenter.remote.proxy.start_proxy_realm_route',
                                                           str(wc_node_oid), wc_worker_id, realm_name, config)
@@ -471,6 +670,245 @@ class ApplicationRealmMonitor(object):
                 )
                 routes.append(route)
         returnValue((routes, is_running_completely))
+
+    @inlineCallbacks
+    def _update_transport_principals(self, arealm: cfxdb.mrealm.ApplicationRealm,
+                                     workergroup_placements: List[RouterWorkerGroupClusterPlacement],
+                                     placement_nodes: Dict[uuid.UUID, Node]):
+        """
+        Update TCP transport principals to include nodes that have come online after transport creation.
+        
+        This handles two scenarios:
+        1. New webcluster (proxy) nodes coming online - need to authenticate for service sessions
+        2. New router nodes coming online - need to authenticate for rlink connections
+        
+        This is called on each monitor iteration to ensure all nodes can authenticate.
+        
+        :param arealm: Application realm being monitored
+        :param workergroup_placements: Router worker placements
+        :param placement_nodes: Map of router cluster node OIDs to Node objects (current placements only)
+        """
+        is_success = True
+        
+        # Get ALL nodes from global DB (includes both router and webcluster nodes)
+        all_nodes = {}
+        with self._manager.gdb.begin() as txn:
+            for node in self._manager.gschema.nodes.select(txn, return_keys=False):
+                all_nodes[node.oid] = node
+        
+        self.log.debug(
+            '{func} Found {cnt} total nodes in global DB for transport principal updates',
+            func=hltype(self._update_transport_principals),
+            cnt=len(all_nodes))
+        
+        # For each router worker placement, check and update transport principals
+        for placement in workergroup_placements:
+            node_oid = placement.node_oid
+            worker_name = placement.worker_name
+            transport_id = 'tnp_{}'.format(worker_name)
+            
+            # Skip if node is not online
+            node = self._manager._session.nodes.get(str(node_oid), None)
+            if not node or node.status != 'online':
+                continue
+            
+            try:
+                # Get current transport configuration
+                transport = yield self._manager._session.call(
+                    'crossbarfabriccenter.remote.router.get_router_transport',
+                    str(node_oid), worker_name, transport_id)
+                
+                if not transport or transport.get('type') != 'rawsocket':
+                    continue
+                
+                # Get current principals from transport config
+                # Note: get_router_transport returns {id, type, config, created_at, ...}
+                # The auth config is inside the 'config' field
+                transport_config = transport.get('config', {})
+                current_auth = transport_config.get('auth', {})
+                cryptosign_config = current_auth.get('cryptosign-proxy', {})
+                current_principals = cryptosign_config.get('principals', {})
+                
+                # Build desired principals list
+                desired_principals = {}
+                
+                # Add ALL router cluster nodes (for rlink) - not just current placements
+                # Get all router cluster nodes from placement_nodes (current placements)
+                # But also check global DB for any additional router nodes that may have been added
+                router_node_oids = set(placement_nodes.keys())
+                all_router_nodes = {oid: node for oid, node in all_nodes.items() if oid in router_node_oids}
+                
+                # Also include any nodes from the same workergroup that may have been added
+                # (This handles new placements that came online)
+                with self._manager.db.begin() as txn:
+                    workergroup = self._manager.schema.router_workergroups[txn, arealm.workergroup_oid]
+                    for placement_oid in self._manager.schema.idx_clusterplacement_by_workername.select(
+                            txn,
+                            from_key=(workergroup.oid, uuid.UUID(bytes=b'\0' * 16), uuid.UUID(bytes=b'\0' * 16), ''),
+                            to_key=(uuid.UUID(int=(int(workergroup.oid) + 1)), uuid.UUID(bytes=b'\0' * 16),
+                                    uuid.UUID(bytes=b'\0' * 16), ''),
+                            return_keys=False):
+                        p = self._manager.schema.router_workergroup_placements[txn, placement_oid]
+                        if p.node_oid in all_nodes:
+                            all_router_nodes[p.node_oid] = all_nodes[p.node_oid]
+                
+                # Build list of all router pubkeys for authorized_keys (mutual authentication)
+                all_router_pubkeys = [n.pubkey for n in all_router_nodes.values()]
+                
+                for router_node in all_router_nodes.values():
+                    desired_principals[router_node.authid] = {
+                        'realm': arealm.name,
+                        'role': 'rlink',
+                        'authorized_keys': all_router_pubkeys,
+                    }
+                
+                # Add all webcluster nodes (for proxy service sessions)
+                # NOTE: For cryptosign-proxy, the 'realm' and 'role' here are ignored - they are
+                # replaced by the forwarded client credentials in PendingAuthCryptosignProxy.
+                # We still need to include these nodes so their pubkey authentication succeeds.
+                if arealm.webcluster_oid:
+                    for wc_node in all_nodes.values():
+                        # Skip nodes that are already added as router nodes
+                        if wc_node.authid not in desired_principals:
+                            desired_principals[wc_node.authid] = {
+                                'realm': arealm.name,  # Ignored for cryptosign-proxy, but required field
+                                'role': 'system',      # Ignored for cryptosign-proxy, but required field  
+                                'authorized_keys': [wc_node.pubkey],
+                            }
+                
+                # Check if principals have actually changed (deep comparison with normalized authorized_keys)
+                # We need to normalize authorized_keys lists for comparison since order doesn't matter
+                def normalize_principals(principals_dict):
+                    """Normalize principals for comparison by sorting authorized_keys lists."""
+                    normalized = {}
+                    for authid, principal in principals_dict.items():
+                        normalized[authid] = {
+                            'realm': principal.get('realm'),
+                            'role': principal.get('role'),
+                            'authorized_keys': sorted(principal.get('authorized_keys', []))
+                        }
+                    return normalized
+                
+                current_normalized = normalize_principals(current_principals)
+                desired_normalized = normalize_principals(desired_principals)
+                
+                principals_changed = current_normalized != desired_normalized
+                
+                if principals_changed:
+                    new_authids = set(desired_principals.keys()) - set(current_principals.keys())
+                    removed_authids = set(current_principals.keys()) - set(desired_principals.keys())
+                    
+                    # Check for authids that exist in both but have changed authorized_keys
+                    modified_authids = set()
+                    for authid in set(current_principals.keys()) & set(desired_principals.keys()):
+                        if current_normalized[authid] != desired_normalized[authid]:
+                            modified_authids.add(authid)
+                    
+                    self.log.info(
+                        '{func} Updating transport {transport_id} principals on worker {worker_name}: '
+                        'current={current_count}, desired={desired_count}, adding={new_count}, removing={removed_count}, modifying={modified_count}',
+                        func=hltype(self._update_transport_principals),
+                        transport_id=hlid(transport_id),
+                        worker_name=hlid(worker_name),
+                        current_count=len(current_principals),
+                        desired_count=len(desired_principals),
+                        new_count=len(new_authids),
+                        removed_count=len(removed_authids),
+                        modified_count=len(modified_authids))
+                    
+                    if new_authids:
+                        self.log.info('{func} New principals to add: {authids}',
+                                     func=hltype(self._update_transport_principals),
+                                     authids=sorted(new_authids))
+                    if removed_authids:
+                        self.log.info('{func} Principals to remove: {authids}',
+                                     func=hltype(self._update_transport_principals),
+                                     authids=sorted(removed_authids))
+                    if modified_authids:
+                        self.log.info('{func} Principals to modify (authorized_keys changed): {authids}',
+                                     func=hltype(self._update_transport_principals),
+                                     authids=sorted(modified_authids))
+                    
+                    # Update transport configuration with new principals
+                    # Extract just the config portion, not runtime attributes
+                    updated_config = dict(transport.get('config', {}))
+                    if 'auth' not in updated_config:
+                        updated_config['auth'] = {}
+                    if 'cryptosign-proxy' not in updated_config['auth']:
+                        updated_config['auth']['cryptosign-proxy'] = {'type': 'static'}
+                    updated_config['auth']['cryptosign-proxy']['principals'] = desired_principals
+                    
+                    # We need to stop and restart the transport to apply new principals
+                    # FIXME: This is disruptive! Better would be dynamic principal updates
+                    try:
+                        # Stop transport with timeout to prevent hanging
+                        stop_d = self._manager._session.call(
+                            'crossbarfabriccenter.remote.router.stop_router_transport',
+                            str(node_oid), worker_name, transport_id)
+                        stop_d.addTimeout(10, _reactor)
+                        
+                        try:
+                            yield stop_d
+                        except TimeoutError:
+                            self.log.warn(
+                                '{func} Timeout stopping transport {transport_id} on worker {worker_name} - may already be stopped',
+                                func=hltype(self._update_transport_principals),
+                                transport_id=hlid(transport_id),
+                                worker_name=hlid(worker_name))
+                        
+                        # Start transport with updated config and timeout
+                        start_d = self._manager._session.call(
+                            'crossbarfabriccenter.remote.router.start_router_transport',
+                            str(node_oid), worker_name, transport_id, updated_config)
+                        start_d.addTimeout(30, _reactor)
+                        
+                        yield start_d
+                        
+                        self.log.info(
+                            '{func} Successfully restarted transport {transport_id} with updated principals on worker {worker_name}',
+                            func=hltype(self._update_transport_principals),
+                            transport_id=hlid(transport_id),
+                            worker_name=hlid(worker_name))
+                    except TimeoutError:
+                        self.log.error(
+                            '{func} Timeout restarting transport {transport_id} with updated principals - will retry in next iteration',
+                            func=hltype(self._update_transport_principals),
+                            transport_id=hlid(transport_id))
+                        is_success = False
+                    except Exception as e:
+                        self.log.error(
+                            '{func} Failed to restart transport {transport_id} with updated principals: {error}',
+                            func=hltype(self._update_transport_principals),
+                            transport_id=hlid(transport_id),
+                            error=str(e))
+                        is_success = False
+                else:
+                    self.log.debug(
+                        '{func} Transport {transport_id} principals already up-to-date ({count} principals)',
+                        func=hltype(self._update_transport_principals),
+                        transport_id=hlid(transport_id),
+                        count=len(current_principals))
+                    
+            except ApplicationError as e:
+                if e.error == 'crossbar.error.no_such_object':
+                    # Transport not yet created, will be handled by _apply_routercluster_placements
+                    pass
+                else:
+                    self.log.error(
+                        '{func} Error checking transport {transport_id}: {error}',
+                        func=hltype(self._update_transport_principals),
+                        transport_id=hlid(transport_id),
+                        error=str(e))
+                    is_success = False
+            except Exception as e:
+                self.log.error(
+                    '{func} Unexpected error updating transport {transport_id}: {error}',
+                    func=hltype(self._update_transport_principals),
+                    transport_id=hlid(transport_id),
+                    error=str(e))
+                is_success = False
+        
+        returnValue(is_success)
 
     @inlineCallbacks
     def _apply_routercluster_placements(self, arealm: cfxdb.mrealm.ApplicationRealm,
@@ -965,27 +1403,83 @@ class ApplicationRealmMonitor(object):
                                                                         other_placement.tcp_listening_port),
                                                 },
                                                 'forward_local_invocations': True,
-                                                'forward_remote_invocations': False,
+                                                'forward_remote_invocations': True,
                                                 'forward_local_events': True,
-                                                'forward_remote_events': False,
+                                                'forward_remote_events': True,
                                             }
-                                            rlink_started = yield self._manager._session.call(
-                                                'crossbarfabriccenter.remote.router.start_router_realm_link',
-                                                str(other_node_oid), other_worker_name, runtime_realm_id,
-                                                runtime_rlink_id, rlink_config)
+                                            
+                                            # Start rlink with timeout and error handling
+                                            try:
+                                                # Call with 30 second client-side timeout
+                                                # Note: CallOptions timeout doesn't work for calls that hang
+                                                # before reaching the router dealer (e.g., during rlink connection/auth)
+                                                call_d = self._manager._session.call(
+                                                    'crossbarfabriccenter.remote.router.start_router_realm_link',
+                                                    str(other_node_oid), other_worker_name, runtime_realm_id,
+                                                    runtime_rlink_id, rlink_config)
+                                                
+                                                # Add client-side timeout using Deferred.addTimeout
+                                                # This will cancel the call and send a WAMP Cancel message
+                                                call_d.addTimeout(30, _reactor)
+                                                
+                                                rlink_started = yield call_d
+                                                
+                                                # Verify rlink was created
+                                                get_d = self._manager._session.call(
+                                                    'crossbarfabriccenter.remote.router.get_router_realm_link',
+                                                    str(other_node_oid), other_worker_name, runtime_realm_id,
+                                                    runtime_rlink_id)
+                                                
+                                                # Add client-side timeout
+                                                get_d.addTimeout(10, _reactor)
+                                                
+                                                running_rlink = yield get_d
 
-                                            running_rlink = yield self._manager._session.call(
-                                                'crossbarfabriccenter.remote.router.get_router_realm_link',
-                                                str(other_node_oid), other_worker_name, runtime_realm_id,
-                                                runtime_rlink_id)
-
-                                            self.log.info(
-                                                '{func} Rlink {runtime_rlink_id} started on router cluster worker {worker_name}:\n{rlink_started}\n{running_rlink}',
-                                                func=hltype(self._apply_routercluster_placements),
-                                                rlink_started=pformat(rlink_started),
-                                                running_rlink=pformat(running_rlink),
-                                                worker_name=hlid(worker_name),
-                                                runtime_rlink_id=hlid(runtime_rlink_id))
+                                                self.log.info(
+                                                    '{func} Rlink {runtime_rlink_id} started on router cluster worker {worker_name}:\n{rlink_started}\n{running_rlink}',
+                                                    func=hltype(self._apply_routercluster_placements),
+                                                    rlink_started=pformat(rlink_started),
+                                                    running_rlink=pformat(running_rlink),
+                                                    worker_name=hlid(worker_name),
+                                                    runtime_rlink_id=hlid(runtime_rlink_id))
+                                                    
+                                            except TimeoutError:
+                                                # Client-side timeout from Deferred.addTimeout()
+                                                self.log.warn(
+                                                    '{func} Client-side timeout starting rlink {runtime_rlink_id} on router cluster worker {worker_name} (node {other_node_oid}) - worker may not be ready yet, will retry',
+                                                    func=hltype(self._apply_routercluster_placements),
+                                                    worker_name=hlid(other_worker_name),
+                                                    other_node_oid=hlid(other_node_oid),
+                                                    runtime_rlink_id=hlid(runtime_rlink_id))
+                                                is_running_completely = False
+                                                    
+                                            except ApplicationError as e:
+                                                if e.error == 'crossbar.error.already_running':
+                                                    # Rlink already exists, treat as success
+                                                    self.log.info(
+                                                        '{func} Rlink {runtime_rlink_id} already running on router cluster worker {worker_name}',
+                                                        func=hltype(self._apply_routercluster_placements),
+                                                        worker_name=hlid(other_worker_name),
+                                                        runtime_rlink_id=hlid(runtime_rlink_id))
+                                                else:
+                                                    self.log.warn(
+                                                        '{func} Failed to start rlink {runtime_rlink_id} on router cluster worker {worker_name} (node {other_node_oid}): {error}',
+                                                        func=hltype(self._apply_routercluster_placements),
+                                                        worker_name=hlid(other_worker_name),
+                                                        other_node_oid=hlid(other_node_oid),
+                                                        runtime_rlink_id=hlid(runtime_rlink_id),
+                                                        error=e.error)
+                                                    is_running_completely = False
+                                                
+                                            except Exception:
+                                                self.log.failure()
+                                                self.log.error(
+                                                    '{func} Unexpected error starting rlink {runtime_rlink_id} on router cluster worker {worker_name} (node {other_node_oid})',
+                                                    func=hltype(self._apply_routercluster_placements),
+                                                    worker_name=hlid(other_worker_name),
+                                                    other_node_oid=hlid(other_node_oid),
+                                                    runtime_rlink_id=hlid(runtime_rlink_id))
+                                                is_running_completely = False
 
             else:
                 if node:
@@ -1452,10 +1946,11 @@ class ApplicationRealmManager(object):
         :return: Application realm start information.
         """
         self.log.info(
-            '{func}(arealm_oid="{arealm_oid}", router_workergroup_oid="{router_workergroup_oid}", details={details})',
+            '{func}(arealm_oid="{arealm_oid}", router_workergroup_oid="{router_workergroup_oid}", webcluster_oid="{webcluster_oid}", details={details})',
             func=hltype(self.start_arealm),
             arealm_oid=hlid(arealm_oid),
             router_workergroup_oid=hlid(router_workergroup_oid),
+            webcluster_oid=hlid(webcluster_oid),
             details=details)
 
         try:
