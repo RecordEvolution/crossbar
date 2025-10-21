@@ -122,6 +122,17 @@ class PendingAuth:
         if 'extra' in principal:
             self._authextra = principal['extra']
 
+        # For cryptosign-proxy, skip realm/role validation because these will be replaced
+        # by the assign() callback with forwarded credentials from authextra
+        if self.AUTHMETHOD == 'cryptosign-proxy':
+            self.log.debug('Skipping realm/role validation for cryptosign-proxy - '
+                          'will be replaced by forwarded credentials')
+            # Still need authid to be set
+            if not self._authid:
+                return Deny(ApplicationError.NO_SUCH_PRINCIPAL, message='no authid assigned')
+            # Skip realm/role validation - they will be set by cryptosign-proxy's assign() callback
+            return None
+
         # a realm must have been assigned by now, otherwise bail out!
         if not self._realm:
             return Deny(ApplicationError.NO_SUCH_REALM, message='no realm assigned')

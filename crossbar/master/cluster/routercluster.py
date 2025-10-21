@@ -336,13 +336,10 @@ class RouterClusterMonitor(object):
                     wc_node = all_nodes[wc_node_oid]
                     # Only add if not already a router node (avoid overlap)
                     if wc_node.authid not in router_authids:
-                        self.log.info(
-                            '{func} Adding proxy principal: authid={authid}, realm=proxy (will be replaced by cryptosign-proxy)',
-                            func=hltype(self._update_workergroup_transport_principals),
-                            authid=hlid(wc_node.authid))
+                        # For cryptosign-proxy: omit 'realm' (use HELLO realm), but set placeholder 'role'
+                        # The cryptosign-proxy will replace the role with proxy_authrole from authextra
                         proxy_principals[wc_node.authid] = {
-                            'realm': 'proxy',  # Placeholder - cryptosign-proxy replaces this with proxy_realm from authextra
-                            'role': 'proxy',
+                            'role': 'proxy',   # Placeholder - will be replaced with proxy_authrole from authextra
                             'authorized_keys': [wc_node.pubkey],
                         }
                 else:
@@ -425,7 +422,10 @@ class RouterClusterMonitor(object):
                         if 'auth' not in updated_config:
                             updated_config['auth'] = {}
                         if 'cryptosign-proxy' not in updated_config['auth']:
-                            updated_config['auth']['cryptosign-proxy'] = {'type': 'static'}
+                            updated_config['auth']['cryptosign-proxy'] = {
+                                'type': 'static',
+                                'default-role': 'proxy'   # Placeholder - replaced by proxy_authrole from authextra
+                            }
 
                         updated_config['auth']['cryptosign-proxy']['principals'] = desired_principals
 
