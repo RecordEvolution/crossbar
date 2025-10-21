@@ -151,6 +151,12 @@ class RouterClusterMonitor(object):
                                           count=hlval(len(created_placements)),
                                           wg_name=hlval(workergroup.name))
 
+            # Update transport principals for all workergroups in this cluster
+            # This ensures router and proxy nodes can authenticate to transports
+            success = yield self._update_workergroup_transport_principals()
+            if not success:
+                is_running_completely = False
+
             if routercluster.status in [cluster.STATUS_STARTING] and is_running_completely:
                 with self._manager.db.begin(write=True) as txn:
                     routercluster = self._manager.schema.routerclusters[txn, self._routercluster_oid]
@@ -181,6 +187,297 @@ class RouterClusterMonitor(object):
                       action=hl(action, color=color, bold=True),
                       func=hltype(self._check_and_apply),
                       routercluster=hlid(self._routercluster_oid))
+
+    @inlineCallbacks
+    def _update_workergroup_transport_principals(self):
+        """
+        Update transport principals for all workergroups in this router cluster.
+
+        This is called at the RouterCluster level (not per-realm) because:
+        1. Transports are SHARED across all application realms on the same workergroup
+        2. We need a single owner to manage the shared resource
+        3. We can collect ALL application realms using each workergroup and set principals once
+
+        For each workergroup, we:
+        1. Collect all router nodes from placements
+        2. Collect all application realms using this workergroup
+        3. For each realm's webcluster, collect proxy nodes
+        4. Build complete principal list with proper realm values
+        5. Update transport on each placement if principals changed
+
+        :return: True if all updates succeeded, False if any failed
+        """
+        is_success = True
+
+        # Get all nodes from global database (we need pubkey and authid attributes)
+        all_nodes = {}
+        with self._manager.gdb.begin() as txn:
+            for node in self._manager.gschema.nodes.select(txn, return_keys=False):
+                # Only include nodes that are currently online (in session)
+                if str(node.oid) in self._manager._session.nodes:
+                    all_nodes[node.oid] = node
+        
+        self.log.info(
+            '{func} Found {count} online nodes in all_nodes: {node_list}',
+            func=hltype(self._update_workergroup_transport_principals),
+            count=len(all_nodes),
+            node_list=[str(oid) for oid in all_nodes.keys()])
+
+        # Get all workergroups for this router cluster
+        with self._manager.db.begin() as txn:
+            workergroup_oids = list(
+                self._manager.schema.idx_workergroup_by_cluster.select(txn,
+                                                                       from_key=(self._routercluster_oid, ''),
+                                                                       return_keys=False))
+
+        self.log.debug('{func} Checking transport principals for {count} workergroup(s)',
+                       func=hltype(self._update_workergroup_transport_principals),
+                       count=len(workergroup_oids))
+
+        # Process each workergroup
+        for workergroup_oid in workergroup_oids:
+            with self._manager.db.begin() as txn:
+                workergroup = self._manager.schema.router_workergroups[txn, workergroup_oid]
+                
+                # Get all placements for this workergroup
+                placements = []
+                for placement_oid in self._manager.schema.idx_clusterplacement_by_workername.select(
+                        txn,
+                        from_key=(workergroup.oid, uuid.UUID(bytes=b'\0' * 16), uuid.UUID(bytes=b'\0' * 16), ''),
+                        to_key=(uuid.UUID(int=(int(workergroup.oid) + 1)), uuid.UUID(bytes=b'\0' * 16),
+                                uuid.UUID(bytes=b'\0' * 16), ''),
+                        return_keys=False):
+                    placement = self._manager.schema.router_workergroup_placements[txn, placement_oid]
+                    placements.append(placement)
+
+                # Get all application realms using this workergroup
+                # Since there's no index, we need to iterate all arealms and filter
+                arealm_oids = []
+                for arealm in self._manager.schema.arealms.select(txn, return_keys=False):
+                    if arealm.workergroup_oid == workergroup.oid:
+                        arealm_oids.append(arealm.oid)
+
+            if not placements:
+                self.log.debug('{func} No placements for workergroup {wg_name}, skipping',
+                               func=hltype(self._update_workergroup_transport_principals),
+                               wg_name=hlval(workergroup.name))
+                continue
+
+            # Build router node set from placements
+            router_node_oids = set(p.node_oid for p in placements)
+            router_nodes = {oid: all_nodes[oid] for oid in router_node_oids if oid in all_nodes}
+
+            # Build desired principals - organized by realm
+            # Structure: {realm_name: {authid: {realm, role, authorized_keys}}}
+            realm_principals = {}
+            
+            # Collect webcluster node OIDs across all realms (for proxy principals)
+            all_webcluster_node_oids = set()
+
+            # Build per-realm router principals and collect webcluster nodes
+            for arealm_oid in arealm_oids:
+                with self._manager.db.begin() as txn:
+                    arealm = self._manager.schema.arealms[txn, arealm_oid]
+                    if not arealm:
+                        continue
+
+                # Build sorted list of router pubkeys for this workergroup
+                all_router_pubkeys = sorted([n.pubkey for n in router_nodes.values()])
+
+                # Build rlink principals for THIS realm
+                realm_principals[arealm.name] = {}
+                for router_node in router_nodes.values():
+                    realm_principals[arealm.name][router_node.authid] = {
+                        'realm': arealm.name,  # Realm-specific for backend routing
+                        'role': 'rlink',
+                        'authorized_keys': all_router_pubkeys,
+                    }
+
+                # Collect webcluster nodes for this realm
+                if arealm.webcluster_oid:
+                    try:
+                        wc_workers = self._manager._session._webcluster_manager.get_webcluster_workers(
+                            arealm.webcluster_oid, filter_online=True)
+                        for wc_node_oid, _wc_worker_id in wc_workers:
+                            all_webcluster_node_oids.add(wc_node_oid)
+                    except Exception:
+                        # Fallback to DB membership if manager not available
+                        with self._manager.db.begin() as txn:
+                            for node_oid in self._manager.schema.idx_webcluster_node_memberships.select(
+                                    txn,
+                                    from_key=(arealm.webcluster_oid, uuid.UUID(bytes=b'\0' * 16)),
+                                    to_key=(uuid.UUID(int=(int(arealm.webcluster_oid) + 1)),
+                                            uuid.UUID(bytes=b'\0' * 16)),
+                                    return_keys=False):
+                                all_webcluster_node_oids.add(node_oid)
+
+            # Build proxy principals (shared across all realms on this workergroup)
+            # Proxy nodes authenticate via cryptosign-proxy which REPLACES the realm value
+            # with the forwarded proxy_realm from authextra, so the realm field here doesn't matter
+            proxy_principals = {}
+            # Collect all authids from router principals to avoid overlap
+            router_authids = set()
+            for realm_name in realm_principals:
+                router_authids.update(realm_principals[realm_name].keys())
+            
+            self.log.info(
+                '{func} Collected webcluster nodes for workergroup {wg_name}: {wc_count} nodes, router_authids={router_authids}',
+                func=hltype(self._update_workergroup_transport_principals),
+                wg_name=hlid(workergroup.name),
+                wc_count=len(all_webcluster_node_oids),
+                router_authids=router_authids)
+            
+            for wc_node_oid in all_webcluster_node_oids:
+                # Convert to UUID if it's a string (webcluster returns strings, all_nodes keyed by UUIDs)
+                if isinstance(wc_node_oid, str):
+                    wc_node_oid = uuid.UUID(wc_node_oid)
+                
+                if wc_node_oid in all_nodes:
+                    wc_node = all_nodes[wc_node_oid]
+                    # Only add if not already a router node (avoid overlap)
+                    if wc_node.authid not in router_authids:
+                        self.log.info(
+                            '{func} Adding proxy principal: authid={authid}, realm=proxy (will be replaced by cryptosign-proxy)',
+                            func=hltype(self._update_workergroup_transport_principals),
+                            authid=hlid(wc_node.authid))
+                        proxy_principals[wc_node.authid] = {
+                            'realm': 'proxy',  # Placeholder - cryptosign-proxy replaces this with proxy_realm from authextra
+                            'role': 'proxy',
+                            'authorized_keys': [wc_node.pubkey],
+                        }
+                else:
+                    self.log.warn(
+                        '{func} Webcluster node {node_oid} not in all_nodes dict',
+                        func=hltype(self._update_workergroup_transport_principals),
+                        node_oid=wc_node_oid)
+
+            # Update transport on each placement
+            for placement in placements:
+                node_oid = placement.node_oid
+                worker_name = placement.worker_name
+                transport_id = 'tnp_{}'.format(worker_name)
+
+                # Skip if node not online
+                node = self._manager._session.nodes.get(str(node_oid), None)
+                if not node or node.status != 'online':
+                    continue
+
+                try:
+                    # Get current transport configuration
+                    transport = yield self._manager._session.call(
+                        'crossbarfabriccenter.remote.router.get_router_transport', str(node_oid), worker_name,
+                        transport_id)
+
+                    if not transport or transport.get('type') != 'rawsocket':
+                        continue
+
+                    # Get current principals
+                    transport_config = transport.get('config', {})
+                    current_auth = transport_config.get('auth', {})
+                    cryptosign_config = current_auth.get('cryptosign-proxy', {})
+                    current_principals = cryptosign_config.get('principals', {})
+
+                    # Build combined desired principals (all realms + proxy)
+                    desired_principals = {}
+                    for realm_name, principals in realm_principals.items():
+                        desired_principals.update(principals)
+                    desired_principals.update(proxy_principals)
+
+                    # Normalize for comparison
+                    def normalize_principals(principals_dict):
+                        """Normalize principals for comparison by sorting authorized_keys lists."""
+                        normalized = {}
+                        for authid, principal in principals_dict.items():
+                            normalized[authid] = {
+                                'realm': principal.get('realm'),
+                                'role': principal.get('role'),
+                                'authorized_keys': sorted(principal.get('authorized_keys', []))
+                            }
+                        return normalized
+
+                    current_normalized = normalize_principals(current_principals)
+                    desired_normalized = normalize_principals(desired_principals)
+
+                    if current_normalized != desired_normalized:
+                        new_authids = set(desired_principals.keys()) - set(current_principals.keys())
+                        removed_authids = set(current_principals.keys()) - set(desired_principals.keys())
+                        modified_authids = set()
+                        for authid in set(current_principals.keys()) & set(desired_principals.keys()):
+                            if current_normalized[authid] != desired_normalized[authid]:
+                                modified_authids.add(authid)
+
+                        self.log.info(
+                            '{func} Updating transport {transport_id} principals on worker {worker_name} for workergroup {wg_name}: '
+                            'current={current_count}, desired={desired_count}, '
+                            'adding={new_count}, removing={removed_count}, modifying={modified_count}',
+                            func=hltype(self._update_workergroup_transport_principals),
+                            transport_id=hlid(transport_id),
+                            worker_name=hlid(worker_name),
+                            wg_name=hlval(workergroup.name),
+                            current_count=len(current_principals),
+                            desired_count=len(desired_principals),
+                            new_count=len(new_authids),
+                            removed_count=len(removed_authids),
+                            modified_count=len(modified_authids))
+
+                        # Update transport configuration
+                        updated_config = dict(transport.get('config', {}))
+                        if 'auth' not in updated_config:
+                            updated_config['auth'] = {}
+                        if 'cryptosign-proxy' not in updated_config['auth']:
+                            updated_config['auth']['cryptosign-proxy'] = {'type': 'static'}
+
+                        updated_config['auth']['cryptosign-proxy']['principals'] = desired_principals
+
+                        # Restart transport with updated config
+                        try:
+                            # Stop transport
+                            yield self._manager._session.call(
+                                'crossbarfabriccenter.remote.router.stop_router_transport', str(node_oid),
+                                worker_name, transport_id)
+
+                            # Start transport with updated config
+                            yield self._manager._session.call(
+                                'crossbarfabriccenter.remote.router.start_router_transport', str(node_oid),
+                                worker_name, transport_id, updated_config)
+
+                            self.log.info(
+                                '{func} Successfully updated transport {transport_id} principals on worker {worker_name}',
+                                func=hltype(self._update_workergroup_transport_principals),
+                                transport_id=hlid(transport_id),
+                                worker_name=hlid(worker_name))
+                        except Exception as e:
+                            self.log.error(
+                                '{func} Failed to restart transport {transport_id} with updated principals: {error}',
+                                func=hltype(self._update_workergroup_transport_principals),
+                                transport_id=hlid(transport_id),
+                                error=str(e))
+                            is_success = False
+                    else:
+                        self.log.debug(
+                            '{func} Transport {transport_id} principals already up-to-date ({count} principals)',
+                            func=hltype(self._update_workergroup_transport_principals),
+                            transport_id=hlid(transport_id),
+                            count=len(current_principals))
+
+                except ApplicationError as e:
+                    if e.error == 'crossbar.error.no_such_object':
+                        # Transport not yet created
+                        pass
+                    else:
+                        self.log.error('{func} Error checking transport {transport_id}: {error}',
+                                       func=hltype(self._update_workergroup_transport_principals),
+                                       transport_id=hlid(transport_id),
+                                       error=str(e))
+                        is_success = False
+                except Exception as e:
+                    self.log.error('{func} Unexpected error updating transport {transport_id}: {error}',
+                                   func=hltype(self._update_workergroup_transport_principals),
+                                   transport_id=hlid(transport_id),
+                                   error=str(e))
+                    is_success = False
+
+        return is_success
 
 
 class RouterClusterManager(object):
