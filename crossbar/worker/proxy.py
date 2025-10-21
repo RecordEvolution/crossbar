@@ -189,10 +189,10 @@ class ProxyFrontendSession(object):
         :param wasClean: Indicates if the transport has been closed regularly.
         :type wasClean: bool
         """
-        self.log.info('{func} proxy frontend session {sessionId} closed (wasClean={wasClean})',
-                      func=hltype(self.onClose),
-                      sessionId=hlid(self._session_id),
-                      wasClean=wasClean)
+        self.log.debug('{func} proxy frontend session {sessionId} closed (wasClean={wasClean})',
+                       func=hltype(self.onClose),
+                       sessionId=hlid(self._session_id),
+                       wasClean=wasClean)
 
         # actually, at this point, the backend session should already be gone, but better check!
         if self._backend_session:
@@ -1682,9 +1682,8 @@ class ProxyController(TransportController):
                     self._service_sessions[realm] = {}
 
             # .. check for (realm, authrole)
-            if self._service_sessions[realm] is not None and (
-                    authrole not in self._service_sessions[realm] or
-                    self._service_sessions[realm][authrole] is None):
+            if self._service_sessions[realm] is not None and (authrole not in self._service_sessions[realm]
+                                                              or self._service_sessions[realm][authrole] is None):
                 if self.has_role(realm, authrole):
                     # get backend connection configuration selected (round-robin or randomly) from all routes
                     # for the desired (realm, authrole)
@@ -1724,10 +1723,8 @@ class ProxyController(TransportController):
             # Check both that we got a session AND that it's still properly cached
             # (the cache check protects against race conditions where another coroutine
             # might have invalidated the session between yield and here)
-            if (service_session is not None and 
-                not isinstance(service_session, Deferred) and
-                self._service_sessions.get(realm) and 
-                self._service_sessions[realm].get(authrole) is not None):
+            if (service_session is not None and not isinstance(service_session, Deferred)
+                    and self._service_sessions.get(realm) and self._service_sessions[realm].get(authrole) is not None):
                 self.log.info(
                     '{klass}.get_service_session(realm="{realm}", authrole="{authrole}") -> found cached service '
                     'session {session} with authid "{session_authid}" and authrole "{session_authrole}"',

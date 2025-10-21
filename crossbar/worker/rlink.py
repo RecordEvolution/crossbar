@@ -123,7 +123,7 @@ class BridgeSession(ApplicationSession):
                     # The event has already been forwarded - check if we're in the chain to prevent loops
                     # Copy the chain to avoid mutating the original message
                     forward_for = list(details.forward_for)
-                    
+
                     # Check if this rlink session or rlink id already appears in the forward chain
                     for hop in forward_for:
                         if hop.get('session') == self._session_id:
@@ -133,7 +133,7 @@ class BridgeSession(ApplicationSession):
                         if rlink_id and hop.get('rlink') == rlink_id:
                             self.log.debug('SKIP! already forwarded through rlink {rlink}', rlink=rlink_id)
                             return
-                    
+
                     # Not in chain yet - append ourselves and continue forwarding for multi-hop
                     self.log.debug('Multi-hop forward: appending to existing chain (forward_for={ff})', ff=forward_for)
                 else:
@@ -312,7 +312,7 @@ class BridgeSession(ApplicationSession):
                 self.log.debug('on_registration_create: skipping registration from other rlink leg for {uri}',
                                uri=reg_details['uri'])
                 return
-            
+
             # Check forward_for chain from the registration details to prevent loops
             # Loop detection is based on router nodes (sessions), not edges (rlinks)
             rlink_id = self.config.extra.get('rlink')
@@ -321,8 +321,11 @@ class BridgeSession(ApplicationSession):
                 # Check if this router node (session) is already in the forward chain
                 for hop in reg_forward_for:
                     if hop.get('session') == self._session_id:
-                        self.log.info('SKIP registration! Loop detected - already forwarded through this router node (session={session}, rlink={rlink}) for {uri}',
-                                       session=self._session_id, rlink=rlink_id, uri=reg_details['uri'])
+                        self.log.info(
+                            'SKIP registration! Loop detected - already forwarded through this router node (session={session}, rlink={rlink}) for {uri}',
+                            session=self._session_id,
+                            rlink=rlink_id,
+                            uri=reg_details['uri'])
                         return
 
             reg_id = reg_details["id"]
@@ -366,8 +369,9 @@ class BridgeSession(ApplicationSession):
 
                 # Skip if this is being called by the other rlink leg (prevents direct ping-pong)
                 if details.caller == other._session_id:
-                    self.log.debug('SKIP! call from other rlink leg (caller={caller}, other={other})', 
-                                   caller=details.caller, other=other._session_id)
+                    self.log.debug('SKIP! call from other rlink leg (caller={caller}, other={other})',
+                                   caller=details.caller,
+                                   other=other._session_id)
                     return
 
                 if details.forward_for:
@@ -375,15 +379,17 @@ class BridgeSession(ApplicationSession):
                     # Loop detection is based on router nodes (sessions), not edges (rlinks)
                     # Copy the chain to avoid mutating the original message
                     forward_for = list(details.forward_for)
-                    
+
                     # Check if this router node (session) already appears in the forward chain
                     for hop in forward_for:
                         if hop.get('session') == self._session_id:
-                            self.log.info('SKIP invocation! Loop detected - already forwarded through this router node (session={session}, rlink={rlink})',
-                                           session=self._session_id, rlink=rlink_id)
+                            self.log.info(
+                                'SKIP invocation! Loop detected - already forwarded through this router node (session={session}, rlink={rlink})',
+                                session=self._session_id,
+                                rlink=rlink_id)
                             return
                             return
-                    
+
                     # Not in chain yet - append ourselves and continue forwarding for multi-hop
                     self.log.debug('Multi-hop forward: appending to existing chain (forward_for={ff})', ff=forward_for)
                 else:
@@ -432,14 +438,14 @@ class BridgeSession(ApplicationSession):
             # Check if original registration used force_reregister
             # Note: This might not be in reg_details, so we'll use it as fallback on conflict
             original_force_reregister = reg_details.get('force_reregister', False)
-            
+
             # Build forward_for chain for registration loop prevention across cluster
             forward_for = []
             reg_forward_for = reg_details.get('forward_for', None)
             if reg_forward_for:
                 # Append to existing chain
                 forward_for = list(reg_forward_for)
-            
+
             # Append this rlink session to the chain
             forward_for.append({
                 'session': self._session_id,
@@ -447,10 +453,9 @@ class BridgeSession(ApplicationSession):
                 'authrole': self._authrole,
                 'rlink': rlink_id,
             })
-            
-            self.log.debug('Forwarding registration for {uri} with forward_for chain: {ff}',
-                          uri=uri, ff=forward_for)
-            
+
+            self.log.debug('Forwarding registration for {uri} with forward_for chain: {ff}', uri=uri, ff=forward_for)
+
             # First try with original settings
             # IMPORTANT: Set details_arg='details' to receive invocation details including forward_for
             try:
@@ -474,8 +479,9 @@ class BridgeSession(ApplicationSession):
                     # This handles stale registrations from previous rlink connections.
                     if not original_force_reregister:
                         other_leg = 'local' if self.IS_REMOTE_LEG else 'remote'
-                        self.log.debug(f"on_registration_create: procedure {uri} already exists on {other_leg} session, "
-                                      f"retrying with force_reregister=True")
+                        self.log.debug(
+                            f"on_registration_create: procedure {uri} already exists on {other_leg} session, "
+                            f"retrying with force_reregister=True")
                         try:
                             reg = yield other.register(on_call,
                                                        uri,
@@ -493,8 +499,9 @@ class BridgeSession(ApplicationSession):
                         # Original already used force_reregister, so this shouldn't happen
                         # unless there's a race condition or multiple rlinks
                         other_leg = 'local' if self.IS_REMOTE_LEG else 'remote'
-                        self.log.error(f"on_registration_create: procedure {uri} already exists on {other_leg} even though "
-                                      f"we used force_reregister=True. Race condition or multiple rlinks?")
+                        self.log.error(
+                            f"on_registration_create: procedure {uri} already exists on {other_leg} even though "
+                            f"we used force_reregister=True. Race condition or multiple rlinks?")
                         return
                 else:
                     raise Exception("fatal: could not forward-register '{}'".format(uri))
@@ -557,17 +564,17 @@ class BridgeSession(ApplicationSession):
             # This is called when RLink Remote leg first connects
             # We need to forward existing LOCAL registrations, but NOT registrations that were
             # already forwarded from other RLinks (to avoid propagation loops)
-            
+
             regs = yield self.call("wamp.registration.list")
             for reg_id in regs['exact']:
                 reg = yield self.call("wamp.registration.get", reg_id)
                 assert reg['id'] == reg_id, "Logic error, registration IDs don't match"
-                
+
                 # Check if this registration was created by an RLink session
                 # by examining the callees (sessions registered for this procedure)
                 try:
                     callee_ids = yield self.call("wamp.registration.list_callees", reg_id)
-                    
+
                     # Skip if any callee is an RLink session (authrole='rlink' or 'trusted')
                     # These are forwarded registrations, not local ones
                     is_rlink_registration = False
@@ -578,24 +585,28 @@ class BridgeSession(ApplicationSession):
                             # RLink sessions use authrole 'trusted' or 'rlink'
                             if callee_authrole in ('trusted', 'rlink'):
                                 is_rlink_registration = True
-                                self.log.debug('Skipping RLink-forwarded registration during initial sync: {uri} (callee authrole={authrole})',
-                                              uri=reg['uri'], authrole=callee_authrole)
+                                self.log.debug(
+                                    'Skipping RLink-forwarded registration during initial sync: {uri} (callee authrole={authrole})',
+                                    uri=reg['uri'],
+                                    authrole=callee_authrole)
                                 break
                         except Exception as e:
                             # Session might have disconnected, skip this check
                             self.log.debug('Could not get session info for callee {callee}: {err}',
-                                          callee=callee_id, err=e)
+                                           callee=callee_id,
+                                           err=e)
                             continue
-                    
+
                     if is_rlink_registration:
                         continue  # Skip this registration
-                        
+
                 except Exception as e:
                     # If we can't get callees, log and skip to be safe
                     self.log.warn('Could not check callees for registration {uri}: {err}',
-                                 uri=reg.get('uri', '?'), err=e)
+                                  uri=reg.get('uri', '?'),
+                                  err=e)
                     continue
-                
+
                 # This is a local registration - forward it
                 # Pass None for reg_session since wamp.registration.get doesn't provide it
                 yield on_registration_create(None, reg)
@@ -628,7 +639,7 @@ class BridgeSession(ApplicationSession):
         # listen to when new registrations are created on the local router
         # Subscribe to INTERNAL event which is always published (even for RLink sessions)
         # to enable cluster-wide registration propagation.
-        # 
+        #
         # IMPORTANT: Each RLink on a router subscribes independently to this event.
         # This ensures that registrations propagate through ALL RLinks in the mesh,
         # not just a single arbitrary one. Loop prevention is handled by:
@@ -755,10 +766,10 @@ class RLinkRemoteSession(BridgeSession):
             # onConnect() cannot return a Deferred - it must call join() synchronously
             _public_key = self.config.extra.get('pubkey', None)
             if not _public_key:
-                self.log.error('{func} No public key provided in config.extra! Cannot authenticate.', 
-                              func=hltype(self.onConnect))
+                self.log.error('{func} No public key provided in config.extra! Cannot authenticate.',
+                               func=hltype(self.onConnect))
                 return
-            
+
             authextra.update({
                 # forward the client pubkey: this allows us to omit authid as
                 # the router can identify us with the pubkey already

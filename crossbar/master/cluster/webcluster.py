@@ -66,7 +66,9 @@ class WebClusterMonitor(object):
         assert self._loop is None
 
         self._loop = LoopingCall(self._check_and_apply)
-        self._loop.start(self._interval)
+        self._loop.start(self._interval, now=False)
+        # Schedule first start a bit after arealm monitor to speed up initial startup
+        _reactor.callLater(self._interval * 2 / 3.0, self._loop)
 
     def stop(self):
         """
@@ -320,12 +322,12 @@ class WebClusterMonitor(object):
                                             call_d = self._manager._session.call(
                                                 'crossbarfabriccenter.remote.proxy.start_web_transport_service',
                                                 node_oid, worker_id, transport_id, path, webservice_config)
-                                            
+
                                             # Add client-side timeout to prevent monitor from hanging
                                             call_d.addTimeout(30, _reactor)
-                                            
+
                                             webservice_started = yield call_d
-                                            
+
                                             self.log.info(
                                                 '{func} Web service started on transport {transport_id} and path "{path}" [{webservice_started}]',
                                                 func=hltype(self._check_and_apply),
@@ -345,14 +347,16 @@ class WebClusterMonitor(object):
                                             # Handle case where realm routes are not configured yet on proxy worker
                                             # This can happen during node restart when ApplicationRealmMonitor hasn't
                                             # configured routes yet. We log a warning and retry in next iteration.
-                                            if e.error == 'crossbar.error.no_such_object' and 'in configured routes' in str(e.args[0] if e.args else ''):
+                                            if e.error == 'crossbar.error.no_such_object' and 'in configured routes' in str(
+                                                    e.args[0] if e.args else ''):
                                                 self.log.warn(
                                                     '{func} Proxy worker realm routes not configured yet for path "{path}" - will retry: {error}',
                                                     func=hltype(self._check_and_apply),
                                                     path=hlval(path),
                                                     error=str(e))
                                                 is_running_completely = False
-                                            elif e.error == 'crossbar.error.cannot_start' and 'could not attach service session' in str(e.args[0] if e.args else ''):
+                                            elif e.error == 'crossbar.error.cannot_start' and 'could not attach service session' in str(
+                                                    e.args[0] if e.args else ''):
                                                 # Handle case where service session cannot be attached because realm/role not ready yet
                                                 # This happens when ApplicationRealmMonitor hasn't configured the realm on the proxy yet
                                                 self.log.warn(

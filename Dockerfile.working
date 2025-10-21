@@ -39,12 +39,5 @@ RUN pip install --no-cache-dir --no-deps .
 # Create working directory for running
 WORKDIR /opt/crossbar
 
-# Copy example config
-RUN mkdir -p .crossbar
-COPY examples/config.json .crossbar/
-
-# Expose ports
-EXPOSE 8080 8443
-
 # Default command
 CMD ["crossbar", "start"]

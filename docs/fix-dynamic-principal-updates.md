@@ -40,7 +40,7 @@ For **router nodes** (rlink connections):
 ```python
 {
     'authid': 'router_name',
-    'realm': 'arealm.name',
+    'realm': 'arealm.name',        # Realm-specific for rlinks
     'role': 'rlink',
     'authorized_keys': [pubkey1, pubkey2, pubkey3, ...]  # All router pubkeys
 }
@@ -50,13 +50,20 @@ For **webcluster/proxy nodes** (service sessions):
 ```python
 {
     'authid': 'proxy_name', 
-    'realm': 'arealm.name',      # Ignored for cryptosign-proxy
-    'role': 'system',             # Ignored for cryptosign-proxy
+    'realm': 'proxy',             # Transport-level placeholder, serves all realms
+    'role': 'proxy',              # Ignored for cryptosign-proxy auth
     'authorized_keys': [pubkey]   # Only this node's pubkey
 }
 ```
 
-**Note**: For cryptosign-proxy authentication, the `realm` and `role` in the principal are ignored and replaced by the forwarded client credentials from `authextra`. We still include webcluster nodes so their pubkey authentication succeeds at the transport layer.
+**IMPORTANT**: The backend transport is **shared across ALL realms** on a worker. Different types of
+principals are used to distinguish connection purposes:
+- Router rlinks use `realm=<arealm.name>` (realm-specific routing)
+- Proxy service sessions use `realm='proxy'` (transport-level placeholder)
+
+**Note**: For cryptosign-proxy authentication (used by proxy service sessions), the `realm` and `role` 
+in the principal are completely ignored and replaced by the forwarded client credentials from 
+`authextra`. The pubkey is all that matters for authentication at the transport layer.
 
 #### Normalized Comparison
 

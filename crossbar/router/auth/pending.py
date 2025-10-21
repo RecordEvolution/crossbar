@@ -137,8 +137,10 @@ class PendingAuth:
         # if realm is not started on router, bail out now!
         if not self._realm_container.has_realm(self._realm):
             # During startup/reconfiguration, routes may not be ready yet
-            return Deny(ApplicationError.NO_SUCH_REALM,
-                        message='no realm "{}" exists on this router - routes may still be initializing, please retry'.format(self._realm))
+            return Deny(
+                ApplicationError.NO_SUCH_REALM,
+                message='no realm "{}" exists on this router - routes may still be initializing, please retry'.format(
+                    self._realm))
 
         # if role is not running on realm, bail out now!
         if self._authrole not in ['trusted', 'anonymous'
@@ -214,8 +216,8 @@ class PendingAuth:
                 # (not due to connection/authentication errors - those would raise exceptions)
                 err = ApplicationError(
                     ApplicationError.NO_SUCH_REALM,
-                    'authenticator realm "{}" with authrole "{}" not available - realm or role may not be configured'.format(
-                        self._authenticator_realm, self._authenticator_role))
+                    'authenticator realm "{}" with authrole "{}" not available - realm or role may not be configured'.
+                    format(self._authenticator_realm, self._authenticator_role))
                 self.log.error(
                     'authenticator service session unavailable for realm "{realm}" with authrole "{authrole}" - '
                     'check that realm exists and role is configured in proxy routes {func}',

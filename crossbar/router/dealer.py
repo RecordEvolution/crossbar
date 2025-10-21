@@ -195,7 +195,7 @@ class Dealer(object):
                 if invoke.callee is invoke.caller:  # if the calling itself - no need to notify
                     continue
                 callee = invoke.callee
-                
+
                 # Always clean up the invocation tracking regardless of call_canceling support
                 if invoke.timeout_call:
                     invoke.timeout_call.cancel()
@@ -208,7 +208,7 @@ class Dealer(object):
 
                 del self._invocations[invoke.id]
                 del self._invocations_by_call[(invoke.caller_session_id, invoke.call.request)]
-                
+
                 # Only send INTERRUPT if the callee supports call canceling
                 if 'callee' in callee._session_roles and callee._session_roles['callee'] and \
                         callee._session_roles['callee'].call_canceling:
@@ -218,10 +218,11 @@ class Dealer(object):
                         request=invoke.id,
                         session=session._session_id,
                     )
-                    self._router.send(invoke.callee, message.Interrupt(
-                        request=invoke.id,
-                        mode=message.Cancel.KILLNOWAIT,
-                    ))
+                    self._router.send(invoke.callee,
+                                      message.Interrupt(
+                                          request=invoke.id,
+                                          mode=message.Cancel.KILLNOWAIT,
+                                      ))
                 else:
                     self.log.debug(
                         "INTERRUPT not supported on in-flight INVOKE with id={request} on"
@@ -548,13 +549,13 @@ class Dealer(object):
                                                         session._session_id,
                                                         registration_details,
                                                         options=options)
-                            
+
                             # Always publish internal event for cluster-wide registration propagation
                             # Include forward_for chain for loop detection in the event payload
                             internal_registration_details = registration_details.copy()
                             if register.forward_for:
                                 internal_registration_details['forward_for'] = register.forward_for
-                            
+
                             service_session.publish('crossbar.registration.on_create_internal',
                                                     session._session_id,
                                                     internal_registration_details,
@@ -897,27 +898,27 @@ class Dealer(object):
         if call.forward_for:
             forwarded_sessions = {hop.get('session') for hop in call.forward_for if hop.get('session')}
             eligible_observers = [obs for obs in registration.observers if obs._session_id not in forwarded_sessions]
-            
+
             if not eligible_observers:
                 # All potential callees are in the forward_for chain - this is a routing loop!
                 self.log.warn('Call loop detected: all {count} registered callees for {uri} are in forward_for chain',
-                              count=len(registration.observers), uri=call.procedure)
-                reply = message.Error(
-                    message.Call.MESSAGE_TYPE, call.request, 'wamp.error.no_eligible_callee',
-                    ['call routing loop detected: all registered callees already in forward chain'])
+                              count=len(registration.observers),
+                              uri=call.procedure)
+                reply = message.Error(message.Call.MESSAGE_TYPE, call.request, 'wamp.error.no_eligible_callee',
+                                      ['call routing loop detected: all registered callees already in forward chain'])
                 reply.correlation_id = call.correlation_id
                 reply.correlation_uri = call.procedure
                 reply.correlation_is_anchor = False
                 reply.correlation_is_last = True
                 self._router.send(session, reply)
                 return False
-            
+
             if len(eligible_observers) < len(registration.observers):
                 self.log.debug('Filtered out {filtered} callees from forward_for chain for {uri}, {eligible} remain',
-                              filtered=len(registration.observers) - len(eligible_observers),
-                              eligible=len(eligible_observers),
-                              uri=call.procedure)
-        
+                               filtered=len(registration.observers) - len(eligible_observers),
+                               eligible=len(eligible_observers),
+                               uri=call.procedure)
+
         # Use filtered list for callee selection
         # Temporarily replace registration.observers with filtered list
         original_observers = registration.observers
@@ -1049,11 +1050,8 @@ class Dealer(object):
         forward_for = None
         if call.forward_for:
             # Check if this session is already in the forward_for chain (avoid duplicates from RLink)
-            session_already_in_chain = any(
-                hop.get('session') == session._session_id 
-                for hop in call.forward_for
-            )
-            
+            session_already_in_chain = any(hop.get('session') == session._session_id for hop in call.forward_for)
+
             if session_already_in_chain:
                 # Session already added by RLink handler, don't duplicate
                 forward_for = call.forward_for
@@ -1065,7 +1063,7 @@ class Dealer(object):
                     'authid': session._authid,
                     'authrole': session._authrole,
                 }]
-        
+
         # set disclosed caller info based on disclose setting
         if disclose:
             if call.forward_for:
@@ -1096,10 +1094,12 @@ class Dealer(object):
         # not when sending to the actual callee (final procedure implementation)
         is_rlink_callee = (callee._authrole == "rlink")
         invocation_forward_for = forward_for if is_rlink_callee else None
-        
+
         if is_rlink_callee:
-            self.log.info("Sending invocation to RLink callee with forward_for={ff} (built from call.forward_for={cff})",
-                          ff=invocation_forward_for, cff=call.forward_for)
+            self.log.info(
+                "Sending invocation to RLink callee with forward_for={ff} (built from call.forward_for={cff})",
+                ff=invocation_forward_for,
+                cff=call.forward_for)
 
         if call.payload:
             invocation = message.Invocation(invocation_request_id,
@@ -1151,11 +1151,11 @@ class Dealer(object):
                                  authorization,
                                  timeout=call.timeout)
         self._router.send(callee, invocation)
-        
+
         # Restore original observers list if we filtered it
         if call.forward_for and eligible_observers != original_observers:
             registration.observers = original_observers
-        
+
         return True
 
     def _add_invoke_request(self,
