@@ -5,7 +5,6 @@
 #
 ###############################################################################
 
-import os
 import uuid
 from typing import Optional, List, Dict
 from pprint import pformat
@@ -20,7 +19,7 @@ from autobahn.wamp.types import CallDetails, PublishOptions, RegisterOptions
 from crossbar._util import hl, hlid, hltype, hlval
 import zlmdb
 from cfxdb.mrealm import ApplicationRealm, ApplicationRealmRoleAssociation, Role, Permission, \
-    WorkerGroupStatus, Principal, Credential, RouterWorkerGroupClusterPlacement, Node
+     Principal, Credential, RouterWorkerGroupClusterPlacement, Node
 
 import txaio
 
@@ -69,7 +68,7 @@ class ApplicationRealmMonitor(object):
         # while self._loop is being executed (which happens every self._interval secs),
         # this flag is set
         self._check_and_apply_in_progress = False
-        
+
         # locks for proxy connections being handled currently
         self._proxy_connection_locks = {}
 
@@ -333,9 +332,9 @@ class ApplicationRealmMonitor(object):
                     connection_id=hlid(connection_id),
                     placement=self._proxy_connection_locks[lock_key])
                 continue
-            
+
             self._proxy_connection_locks[lock_key] = placement
-            
+
             try:
                 connection = yield self._manager._session.call(
                     'crossbarfabriccenter.remote.proxy.get_proxy_connection', str(wc_node_oid), wc_worker_id,
@@ -739,181 +738,39 @@ class ApplicationRealmMonitor(object):
                                node_authid=hlid(node_authid),
                                node_oid=hlid(node_oid))
 
-                # II.1) get worker run-time information (obtained by calling into the live node)
+                # NOTE: Worker and transport creation is now handled by
+                # RouterClusterMonitor._update_workergroup_transport_principals()
+                # This ensures a single owner manages the complete worker lifecycle
+
+                # Get worker to verify it's running (created by RouterClusterMonitor)
                 worker = None
                 try:
                     worker = yield self._manager._session.call('crossbarfabriccenter.remote.node.get_worker',
                                                                str(node_oid), worker_name)
+                    self.log.debug(
+                        '{func} Worker {worker_name} is running on node {node_oid} (managed by RouterClusterMonitor)',
+                        func=hltype(self._apply_routercluster_placements),
+                        node_oid=hlid(node_oid),
+                        worker_name=hlid(worker_name))
                 except ApplicationError as e:
                     if e.error != 'crossbar.error.no_such_worker':
-                        # anything but "no_such_worker" is unexpected (and fatal)
-                        raise
-                    self.log.warn(
-                        '{func} No router cluster worker {worker_name} currently running on node {node_oid}: starting worker ..',
-                        func=hltype(self._apply_routercluster_placements),
-                        node_oid=hlid(node_oid),
-                        worker_name=hlid(worker_name))
-                except:
-                    self.log.failure()
-                    raise
-                else:
-                    self.log.debug(
-                        '{func} Ok, router cluster worker {worker_name} already running on node {node_oid}!',
-                        func=hltype(self._apply_routercluster_placements),
-                        node_oid=hlid(node_oid),
-                        worker_name=hlid(worker_name))
-
-                # II.2) if there isn't a worker running (with worker ID as we expect) already, start a new router worker
-                if not worker:
-                    worker_options = {
-                        'env': {
-                            'inherit': ['PYTHONPATH']
-                        },
-                        'title': 'Managed router worker {}'.format(worker_name),
-                        'extra': {}
-                    }
-                    try:
-                        worker_started = yield self._manager._session.call(
-                            'crossbarfabriccenter.remote.node.start_worker', str(node_oid), worker_name, 'router',
-                            worker_options)
-                        worker = yield self._manager._session.call('crossbarfabriccenter.remote.node.get_worker',
-                                                                   str(node_oid), worker_name)
-                        self.log.info(
-                            '{func} Router cluster worker {worker_name} started on node {node_oid} [{worker_started}]',
+                        self.log.warn(
+                            '{func} Worker {worker_name} not yet running on node {node_oid} - will be created by RouterClusterMonitor on next iteration',
                             func=hltype(self._apply_routercluster_placements),
                             node_oid=hlid(node_oid),
-                            worker_name=hlid(worker['id']),
-                            worker_started=worker_started)
-                    except:
-                        self.log.failure()
+                            worker_name=hlid(worker_name))
                         is_running_completely = False
+                        continue
 
                 # we can only continue with transport(s) when we now have a worker started already
+                # NOTE: Transport creation and principal management is now handled by
+                # RouterClusterMonitor._update_workergroup_transport_principals()
+                # This ensures a single owner manages transport principals across all realms
                 if worker:
-
-                    transport_id = 'tnp_{}'.format(worker_name)
-                    transport = None
-
-                    # III.1) get transport run-time information (obtained by calling into the live node)
-                    try:
-                        transport = yield self._manager._session.call(
-                            'crossbarfabriccenter.remote.router.get_router_transport', str(node_oid), worker_name,
-                            transport_id)
-                    except ApplicationError as e:
-                        if e.error != 'crossbar.error.no_such_object':
-                            # anything but "no_such_object" is unexpected (and fatal)
-                            raise
-                        self.log.info(
-                            '{func} No Transport {transport_id} currently running for Web cluster worker {worker_name}: starting transport ..',
-                            func=hltype(self._apply_routercluster_placements),
-                            worker_name=hlid(worker_name),
-                            transport_id=hlid(transport_id))
-                    else:
-                        self.log.debug(
-                            '{func} Ok, transport {transport_id} already running on Web cluster worker {worker_name}',
-                            func=hltype(self._apply_routercluster_placements),
-                            worker_name=hlid(worker_name),
-                            transport_id=hlid(transport_id))
-
-                    # III.2) if there isn't a transport started (with transport ID as we expect) already,
-                    # start a new transport
-                    if not transport:
-
-                        # FIXME: allow to configure transport type TCP vs UDS
-                        USE_UDS = False
-
-                        if USE_UDS:
-                            # https://serverfault.com/a/641387/117074
-                            UNIX_PATH_MAX = 108
-                            transport_path = os.path.abspath('{}.sock'.format(transport_id))
-                            if len(transport_path) > UNIX_PATH_MAX:
-                                raise RuntimeError(
-                                    'unix domain socket path too long! was {}, but maximum is {}'.format(
-                                        len(transport_path), UNIX_PATH_MAX))
-                            transport_config = {
-                                'id': transport_id,
-                                'type': 'rawsocket',
-                                'endpoint': {
-                                    'type': 'unix',
-                                    'path': transport_path
-                                },
-                                'options': {
-                                    # FIXME: must be >= max_message_size on proxy transport
-                                    # "max_message_size": 1048576
-                                },
-                                'serializers': ['cbor'],
-                                'auth': {
-                                    # use anonymous-proxy authentication for UDS based connections (on localhost only)
-                                    'anonymous-proxy': {
-                                        'type': 'static'
-                                    }
-                                }
-                            }
-                        else:
-                            principals = {}
-                            all_pubkeys = [node.pubkey for node in placement_nodes.values()]
-                            for node in placement_nodes.values():
-                                principal = {
-                                    'realm': arealm.name,
-                                    'role': 'rlink',
-                                    'authorized_keys': all_pubkeys,
-                                }
-                                principals[node.authid] = principal
-
-                            transport_config = {
-                                'id': transport_id,
-                                'type': 'rawsocket',
-                                'endpoint': {
-                                    'type': 'tcp',
-                                    # let the router worker auto-assign a listening port from this range
-                                    'portrange': [10000, 10100]
-                                },
-                                'options': {
-                                    # FIXME: must be >= max_message_size on proxy transport
-                                    # "max_message_size": 1048576
-                                },
-                                'serializers': ['cbor'],
-                                'auth': {
-                                    # use cryptosign-proxy authentication for TCP based connections
-                                    'cryptosign-proxy': {
-                                        'type': 'static',
-                                        'principals': principals
-                                    }
-                                }
-                            }
-
-                        try:
-                            transport_started = yield self._manager._session.call(
-                                'crossbarfabriccenter.remote.router.start_router_transport', str(node_oid),
-                                worker_name, transport_id, transport_config)
-                            transport = yield self._manager._session.call(
-                                'crossbarfabriccenter.remote.router.get_router_transport', str(node_oid), worker_name,
-                                transport_id)
-                            self.log.info(
-                                '{func} Transport {transport_id} started on router cluster worker {worker_name} [{transport_started}]',
-                                func=hltype(self._apply_routercluster_placements),
-                                worker_name=hlid(worker_name),
-                                transport_id=hlid(transport_id),
-                                transport_started=transport_started)
-                        except:
-                            self.log.failure()
-                            is_running_completely = False
-                        else:
-                            # when a new transport was started with an auto-assigned portrange, grab the
-                            # actual TCP listening port that was selected on the target node
-                            tcp_listening_port = transport_started['config']['endpoint']['port']
-
-                            with self._manager.db.begin(write=True) as txn:
-                                placement = self._manager.schema.router_workergroup_placements[txn, placement.oid]
-                                placement.changed = time_ns()
-                                placement.status = WorkerGroupStatus.RUNNING
-                                placement.tcp_listening_port = tcp_listening_port
-                                self._manager.schema.router_workergroup_placements[txn, placement.oid] = placement
-
-                            self.log.info('{func} Ok, placement {placement_oid} updated:\n{placement}',
-                                          func=hltype(self._apply_routercluster_placements),
-                                          placement_oid=hlid(placement.oid),
-                                          placement=placement)
+                    self.log.info(
+                        '{func} Worker {worker_name} is running - transport will be managed by RouterClusterMonitor',
+                        func=hltype(self._apply_routercluster_placements),
+                        worker_name=hlid(worker_name))
 
                     # IV.1) get arealm run-time information (obtained by calling into the live node)
 

@@ -126,7 +126,7 @@ class PendingAuth:
         # by the assign() callback with forwarded credentials from authextra
         if self.AUTHMETHOD == 'cryptosign-proxy':
             self.log.debug('Skipping realm/role validation for cryptosign-proxy - '
-                          'will be replaced by forwarded credentials')
+                           'will be replaced by forwarded credentials')
             # Still need authid to be set
             if not self._authid:
                 return Deny(ApplicationError.NO_SUCH_PRINCIPAL, message='no authid assigned')

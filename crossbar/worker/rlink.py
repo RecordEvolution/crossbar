@@ -819,7 +819,7 @@ class RLinkRemoteSession(BridgeSession):
     def onChallenge(self, challenge):
         self.log.debug('{func}(challenge={challenge})', func=hltype(self.onChallenge), challenge=challenge)
 
-        if challenge.method == 'cryptosign':
+        if challenge.method in ('cryptosign', 'cryptosign-proxy'):
             # alright, we've got a challenge from the router.
 
             # sign the challenge with our private key.

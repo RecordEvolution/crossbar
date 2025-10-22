@@ -147,9 +147,9 @@ class PendingAuthCryptosign(PendingAuth):
             if client_trustroot_name_category not in ['eth', 'ens', 'reverse_ens']:
                 return Deny(message='invalid client trustroot "{}" provided'.format(client_trustroot))
             self.log.debug('{func} using client trustroot {trustroot_name_category} "{trustroot}" from client HELLO',
-                          trustroot=hlid(client_trustroot),
-                          trustroot_name_category=hlval(client_trustroot_name_category, color='green'),
-                          func=hltype(self.hello))
+                           trustroot=hlid(client_trustroot),
+                           trustroot_name_category=hlval(client_trustroot_name_category, color='green'),
+                           func=hltype(self.hello))
 
         # get certificates presented by the client
         client_certificates = details.authextra.get('certificates', None) if details.authextra else None
@@ -163,9 +163,9 @@ class PendingAuthCryptosign(PendingAuth):
                         message='invalid type {} for certificate {} in client certificates'.format(type(cc), cc_i))
             client_certificates = parse_certificate_chain(client_certificates)
             self.log.debug('{func} using {cnt_cc} client certificates from client HELLO:\n{client_certificates}',
-                          cnt_cc=hlval(len(client_certificates), color='green'),
-                          client_certificates=client_certificates,
-                          func=hltype(self.hello))
+                           cnt_cc=hlval(len(client_certificates), color='green'),
+                           client_certificates=client_certificates,
+                           func=hltype(self.hello))
 
         if self._config['type'] == 'static':
 
