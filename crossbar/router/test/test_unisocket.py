@@ -1,34 +1,9 @@
 #####################################################################################
 #
-#  Copyright (c) Crossbar.io Technologies GmbH
-#
-#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
-#  you have purchased a commercial license), the license terms below apply.
-#
-#  Should you enter into a separate license agreement after having received a copy of
-#  this software, then the terms of such license agreement replace the terms below at
-#  the time at which such license agreement becomes effective.
-#
-#  In case a separate license agreement ends, and such agreement ends without being
-#  replaced by another separate license agreement, the license terms below apply
-#  from the time at which said agreement ends.
-#
-#  LICENSE TERMS
-#
-#  This program is free software: you can redistribute it and/or modify it under the
-#  terms of the GNU Affero General Public License, version 3, as published by the
-#  Free Software Foundation. This program is distributed in the hope that it will be
-#  useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
-#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-#
-#  See the GNU Affero General Public License Version 3 for more details.
-#
-#  You should have received a copy of the GNU Affero General Public license along
-#  with this program. If not, see <http://www.gnu.org/licenses/agpl-3.0.en.html>.
+#  Copyright (c) typedef int GmbH
+#  SPDX-License-Identifier: EUPL-1.2
 #
 #####################################################################################
-
-from __future__ import absolute_import, division
 
 from collections import OrderedDict
 
@@ -45,7 +20,6 @@ class UniSocketTests(TestCase):
     """
     Tests for Crossbar's RawSocket.
     """
-
     def test_rawsocket_with_no_factory(self):
         """
         Trying to speak RawSocket with no RawSocket factory configured will
@@ -167,7 +141,7 @@ class UniSocketTests(TestCase):
                 self.transport.write(data)
 
         fake_websocket = Factory.forProtocol(MyFakeWebSocket)
-        websocket_map = OrderedDict({u"baz": None})
+        websocket_map = OrderedDict({"baz": None})
         websocket_map["ws"] = fake_websocket
 
         f = UniSocketServerFactory(websocket_factory_map=websocket_map)
@@ -180,8 +154,7 @@ class UniSocketTests(TestCase):
         p.dataReceived(b'GET /ws HTTP/1.1\r\nConnection: close\r\n\r\n')
 
         self.assertTrue(t.connected)
-        self.assertEqual(t.value(),
-                         b'GET /ws HTTP/1.1\r\nConnection: close\r\n\r\n')
+        self.assertEqual(t.value(), b'GET /ws HTTP/1.1\r\nConnection: close\r\n\r\n')
 
     def test_websocket_with_no_map(self):
         """
@@ -189,7 +162,7 @@ class UniSocketTests(TestCase):
         """
         t = StringTransport()
 
-        websocket_map = {u"x": None, u"y": None}
+        websocket_map = {"x": None, "y": None}
 
         f = UniSocketServerFactory(websocket_factory_map=websocket_map)
         p = f.buildProtocol(None)

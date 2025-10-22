@@ -1,30 +1,7 @@
 #####################################################################################
 #
-#  Copyright (c) Crossbar.io Technologies GmbH
-#
-#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
-#  you have purchased a commercial license), the license terms below apply.
-#
-#  Should you enter into a separate license agreement after having received a copy of
-#  this software, then the terms of such license agreement replace the terms below at
-#  the time at which such license agreement becomes effective.
-#
-#  In case a separate license agreement ends, and such agreement ends without being
-#  replaced by another separate license agreement, the license terms below apply
-#  from the time at which said agreement ends.
-#
-#  LICENSE TERMS
-#
-#  This program is free software: you can redistribute it and/or modify it under the
-#  terms of the GNU Affero General Public License, version 3, as published by the
-#  Free Software Foundation. This program is distributed in the hope that it will be
-#  useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
-#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-#
-#  See the GNU Affero General Public License Version 3 for more details.
-#
-#  You should have received a copy of the GNU Affero General Public license along
-#  with this program. If not, see <http://www.gnu.org/licenses/agpl-3.0.en.html>.
+#  Copyright (c) typedef int GmbH
+#  SPDX-License-Identifier: EUPL-1.2
 #
 #####################################################################################
 
@@ -36,88 +13,67 @@ import jinja2
 
 from txaio import make_logger
 
-__all__ = ('Templates',)
+__all__ = ('Templates', )
+
+log = make_logger()
 
 
 class Templates:
-
     """
     Crossbar.io application templates.
     """
-
-    log = make_logger()
 
     SKIP_FILES = ('.pyc', '.pyo', '.exe')
     """
     File extensions of files to skip when instantiating an application template.
     """
 
-    TEMPLATES = [
-        {
-            "name": "default",
-            "help": "A WAMP router speaking WebSocket plus a static Web server.",
-            "basedir": "node/templates/default",
-            "params": {
-            },
-            "skip_jinja": ["autobahn.js", "autobahn.min.js", "autobahn.min.jgz"]
+    TEMPLATES = {
+        'default': {
+            'name': 'default',
+            'help': 'A WAMP router speaking WebSocket plus a static Web server.',
+            'basedir': "node/templates/default",
+            'params': {},
+            'skip_jinja': ['autobahn.js', 'autobahn.min.js', 'autobahn.min.jgz']
         }
-    ]
+    }
     """
     Application template definitions.
     """
-
-    def help(self):
+    @staticmethod
+    def help():
         """
         Print CLI help.
         """
         print("\nAvailable Crossbar.io node templates:\n")
-        for t in self.TEMPLATES:
-            print("  {} {}".format(t['name'].ljust(16, ' '), t['help']))
+        for name, template in Templates.TEMPLATES.values():
+            print("  {} {}".format(name.ljust(16, ' '), template['help']))
         print("")
 
-    def __contains__(self, template):
+    @staticmethod
+    def init(appdir, template='default', params=None, dryrun=False, skip_existing=True):
         """
-        Check if template exists.
-
-        :param template: The name of the application template to check.
-        :type template: str
-        """
-        for t in self.TEMPLATES:
-            if t['name'] == template:
-                return True
-        return False
-
-    def __getitem__(self, template):
-        """
-        Get template by name.
-
-        :param template: The name of the application template to get.
-        :type template: str
-        """
-        for t in self.TEMPLATES:
-            if t['name'] == template:
-                return t
-        raise KeyError
-
-    def init(self, appdir, template, params=None, dryrun=False, skip_existing=True):
-        """
-        Ctor.
-
+        Initialize an application directory from a template by template name.
 
         :param appdir: The path of the directory to instantiate the application template in.
         :type appdir: str
+
         :param template: The name of the application template to instantiate.
         :type template: str
+
         :param dryrun: If `True`, only perform a dry run (don't actually do anything, only prepare).
         :type dryrun: bool
         """
         IS_WIN = sys.platform.startswith("win")
 
-        template = self.__getitem__(template)
+        template = Templates.TEMPLATES.get(template, None)
+        if not template:
+            raise Exception('no such application directory template: "{}"'.format(template))
+
         basedir = pkg_resources.resource_filename("crossbar", template['basedir'])
         if IS_WIN:
             basedir = basedir.replace('\\', '/')  # Jinja need forward slashes even on Windows
-        self.log.info("Using template from '{dir}'", dir=basedir)
+        log.info("Using template from '{dir}'", dir=basedir)
 
         appdir = os.path.abspath(appdir)
 
@@ -147,12 +103,12 @@ class Templates:
                     if os.path.isdir(create_dir_path):
                         msg = "Directory {} already exists".format(create_dir_path)
                         if not skip_existing:
-                            self.log.info(msg)
+                            log.info(msg)
                             raise Exception(msg)
                         else:
-                            self.log.warn("{msg} - SKIPPING", msg=msg)
+                            log.warn("{msg} - SKIPPING", msg=msg)
                     else:
-                        self.log.info("Creating directory {dir}", dir=create_dir_path)
+                        log.info("Creating directory {dir}", dir=create_dir_path)
                         if not dryrun:
                             os.mkdir(create_dir_path)
                         created.append(('dir', create_dir_path))
@@ -173,12 +129,12 @@ class Templates:
                         if os.path.isfile(dst_file):
                             msg = "File {} already exists".format(dst_file)
                             if not skip_existing:
-                                self.log.info(msg)
+                                log.info(msg)
                                 raise Exception(msg)
                             else:
-                                self.log.warn("{msg} - SKIPPING", msg=msg)
+                                log.warn("{msg} - SKIPPING", msg=msg)
                         else:
-                            self.log.info("Creating file {name}", name=dst_file)
+                            log.info("Creating file {name}", name=dst_file)
                             if not dryrun:
                                 if f in template.get('skip_jinja', []):
                                     shutil.copy(src_file, dst_file)
@@ -199,22 +155,22 @@ class Templates:
             return template.get('get_started_hint', None)
 
         except Exception:
-            self.log.failure("Something went wrong while instantiating app template - rolling back changes ..")
+            log.failure("Something went wrong while instantiating app template - rolling back changes ..")
             for ptype, path in reversed(created):
                 if ptype == 'file':
                     try:
-                        self.log.info("Removing file {path}", path=path)
+                        log.info("Removing file {path}", path=path)
                         if not dryrun:
                             os.remove(path)
                     except:
-                        self.log.warn("Warning: could not remove file {path}", path=path)
+                        log.warn("Warning: could not remove file {path}", path=path)
                 elif ptype == 'dir':
                     try:
-                        self.log.info("Removing directory {path}", path=path)
+                        log.info("Removing directory {path}", path=path)
                         if not dryrun:
                             os.rmdir(path)
                     except:
-                        self.log.warn("Warning: could not remove directory {path}", path=path)
+                        log.warn("Warning: could not remove directory {path}", path=path)
                 else:
                     raise Exception("logic error")
             raise

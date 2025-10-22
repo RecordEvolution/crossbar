@@ -42,3 +42,17 @@ docs/_build
 vers/
 .DS_Store
 _build
+pip-wheel-metadata
+
+# vscode
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.vscode
+get-pip.py
+.db-controller
+.db-mrealm-*
+.xbrnetwork
+test/test_automated/.test/

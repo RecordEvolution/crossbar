@@ -1,78 +1,65 @@
 #####################################################################################
 #
-#  Copyright (c) Crossbar.io Technologies GmbH
-#
-#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
-#  you have purchased a commercial license), the license terms below apply.
-#
-#  Should you enter into a separate license agreement after having received a copy of
-#  this software, then the terms of such license agreement replace the terms below at
-#  the time at which such license agreement becomes effective.
-#
-#  In case a separate license agreement ends, and such agreement ends without being
-#  replaced by another separate license agreement, the license terms below apply
-#  from the time at which said agreement ends.
-#
-#  LICENSE TERMS
-#
-#  This program is free software: you can redistribute it and/or modify it under the
-#  terms of the GNU Affero General Public License, version 3, as published by the
-#  Free Software Foundation. This program is distributed in the hope that it will be
-#  useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
-#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-#
-#  See the GNU Affero General Public License Version 3 for more details.
-#
-#  You should have received a copy of the GNU Affero General Public license along
-#  with this program. If not, see <http://www.gnu.org/licenses/agpl-3.0.en.html>.
+#  Copyright (c) typedef int GmbH
+#  SPDX-License-Identifier: EUPL-1.2
 #
 #####################################################################################
 
-from __future__ import absolute_import
+from typing import Union
+from txaio import make_logger, as_future
 
 from autobahn import util
-from autobahn.wamp import types
-
-from txaio import make_logger
+from autobahn.wamp.types import Accept, Deny, HelloDetails, Challenge
 
 from crossbar.router.auth.pending import PendingAuth
+from crossbar._util import hlid, hltype, hlval
 
-__all__ = ('PendingAuthAnonymous',)
+__all__ = (
+    'PendingAuthAnonymous',
+    'PendingAuthAnonymousProxy',
+)
 
 
 class PendingAuthAnonymous(PendingAuth):
-
     """
     Pending authentication information for WAMP-Anonymous authentication.
     """
 
     log = make_logger()
 
-    AUTHMETHOD = u'anonymous'
+    AUTHMETHOD = 'anonymous'
 
-    def hello(self, realm, details):
+    def hello(self, realm: str, details: HelloDetails) -> Union[Accept, Deny, Challenge]:
+        self.log.info(
+            '{func}(realm={realm}, details.realm={authrealm}, details.authid={authid}, details.authrole={authrole}) [config={config}]',
+            func=hltype(self.hello),
+            realm=hlid(realm),
+            authrealm=hlid(details.realm),
+            authid=hlid(details.authid),
+            authrole=hlid(details.authrole),
+            config=self._config)
 
         # remember the realm the client requested to join (if any)
         self._realm = realm
 
-        # remember the authid the client wants to identify as (if any)
-        self._authid = details.authid or util.generate_serial_number()
+        self._authid = self._config.get('authid', util.generate_serial_number())
 
-        self._session_details[u'authmethod'] = u'anonymous'
-        self._session_details[u'authextra'] = details.authextra
+        self._session_details['authmethod'] = 'anonymous'
+        self._session_details['authextra'] = details.authextra
 
         # WAMP-anonymous "static"
-        if self._config[u'type'] == u'static':
+        if self._config['type'] == 'static':
 
-            self._authprovider = u'static'
+            self._authprovider = 'static'
 
             # FIXME: if cookie tracking is enabled, set authid to cookie value
             # self._authid = self._transport._cbtid
 
             principal = {
-                u'authid': self._authid,
-                u'role': details.authrole or self._config.get(u'role', u'anonymous'),
-                u'extra': details.authextra
+                'realm': realm,
+                'authid': self._authid,
+                'role': self._config.get('role', 'anonymous'),
+                'extra': details.authextra
             }
 
             error = self._assign_principal(principal)
@@ -82,30 +69,81 @@ class PendingAuthAnonymous(PendingAuth):
             return self._accept()
 
         # WAMP-Ticket "dynamic"
-        elif self._config[u'type'] == u'dynamic':
+        elif self._config['type'] == 'dynamic':
 
-            self._authprovider = u'dynamic'
+            self._authprovider = 'dynamic'
 
-            error = self._init_dynamic_authenticator()
-            if error:
-                return error
+            init_d = as_future(self._init_dynamic_authenticator)
 
-            d = self._authenticator_session.call(self._authenticator, self._realm, self._authid, self._session_details)
+            def init(result):
+                if result:
+                    return result
 
-            def on_authenticate_ok(principal):
-                error = self._assign_principal(principal)
-                if error:
-                    return error
+                d = self._authenticator_session.call(self._authenticator, self._realm, self._authid,
+                                                     self._session_details)
 
-                return self._accept()
+                def on_authenticate_ok(_principal):
+                    _error = self._assign_principal(_principal)
+                    if _error:
+                        return _error
 
-            def on_authenticate_error(err):
-                return self._marshal_dynamic_authenticator_error(err)
+                    return self._accept()
 
-            d.addCallbacks(on_authenticate_ok, on_authenticate_error)
+                def on_authenticate_error(err):
+                    return self._marshal_dynamic_authenticator_error(err)
 
-            return d
+                d.addCallbacks(on_authenticate_ok, on_authenticate_error)
+
+                return d
+
+            init_d.addBoth(init)
+            return init_d
 
         else:
             # should not arrive here, as config errors should be caught earlier
-            return types.Deny(message=u'invalid authentication configuration (authentication type "{}" is unknown)'.format(self._config['type']))
+            return Deny(message='invalid authentication configuration (authentication type "{}" is unknown)'.format(
+                self._config['type']))
+
+
+class PendingAuthAnonymousProxy(PendingAuthAnonymous):
+    """
+    Pending Anonymous authentication with additions for proxy
+    """
+
+    log = make_logger()
+    AUTHMETHOD = 'anonymous-proxy'
+
+    def hello(self, realm, details):
+        self.log.debug('{func}(realm="{realm}", details={details})',
+                       func=hltype(self.hello),
+                       realm=hlval(realm),
+                       details=details)
+        extra = details.authextra or {}
+
+        for attr in ['proxy_authid', 'proxy_authrole', 'proxy_realm']:
+            if attr not in extra:
+                return Deny(message='missing required attribute {}'.format(attr))
+
+        realm = extra['proxy_realm']
+        details.authid = extra['proxy_authid']
+        details.authrole = extra['proxy_authrole']
+        details.authextra = extra.get('proxy_authextra', None)
+
+        # remember the realm the client requested to join (if any)
+        self._realm = realm
+        self._authid = details.authid
+        self._authrole = details.authrole
+        self._session_details['authmethod'] = self.AUTHMETHOD
+        self._session_details['authextra'] = details.authextra
+        self._authprovider = 'static'
+
+        # FIXME: if cookie tracking is enabled, set authid to cookie value
+        # self._authid = self._transport._cbtid
+
+        principal = {'realm': realm, 'authid': details.authid, 'role': details.authrole, 'extra': details.authextra}
+
+        error = self._assign_principal(principal)
+        if error:
+            return error
+
+        return self._accept()

@@ -1,44 +1,20 @@
 #####################################################################################
 #
-#  Copyright (c) Crossbar.io Technologies GmbH
-#
-#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
-#  you have purchased a commercial license), the license terms below apply.
-#
-#  Should you enter into a separate license agreement after having received a copy of
-#  this software, then the terms of such license agreement replace the terms below at
-#  the time at which such license agreement becomes effective.
-#
-#  In case a separate license agreement ends, and such agreement ends without being
-#  replaced by another separate license agreement, the license terms below apply
-#  from the time at which said agreement ends.
-#
-#  LICENSE TERMS
-#
-#  This program is free software: you can redistribute it and/or modify it under the
-#  terms of the GNU Affero General Public License, version 3, as published by the
-#  Free Software Foundation. This program is distributed in the hope that it will be
-#  useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
-#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-#
-#  See the GNU Affero General Public License Version 3 for more details.
-#
-#  You should have received a copy of the GNU Affero General Public license along
-#  with this program. If not, see <http://www.gnu.org/licenses/agpl-3.0.en.html>.
+#  Copyright (c) typedef int GmbH
+#  SPDX-License-Identifier: EUPL-1.2
 #
 #####################################################################################
 
-from __future__ import absolute_import
-
+import sys
 import os
 import gc
 
 from datetime import datetime
+from pprint import pformat
 
 from twisted.internet.defer import inlineCallbacks, returnValue
 from twisted.internet.task import LoopingCall
 from twisted.python.failure import Failure
-
 
 try:
     # Manhole support needs a couple of packages optional for Crossbar.
@@ -52,35 +28,36 @@ except ImportError as e:
     _MANHOLE_MISSING_REASON = str(e)
 else:
     _HAS_MANHOLE = True
-    _MANHOLE_MISSING_REASON = None
-
+    _MANHOLE_MISSING_REASON = ''
 
 from autobahn.util import utcnow, utcstr, rtime
 from autobahn.twisted.wamp import ApplicationSession
 from autobahn.wamp.exception import ApplicationError
-from autobahn.wamp.types import PublishOptions, RegisterOptions
+from autobahn.wamp.types import PublishOptions, RegisterOptions, ComponentConfig
 from autobahn import wamp
 
+import txaio
 from txaio import make_logger
 
 from twisted.cred import portal
 
+from crossbar._util import hl, hlval, hltype, hlid
 from crossbar.common.twisted.endpoint import create_listening_port_from_config
 
 from crossbar.common.processinfo import _HAS_PSUTIL
 if _HAS_PSUTIL:
     import psutil
     from crossbar.common.processinfo import ProcessInfo
+    from crossbar.common.monitor import ProcessMonitor
 
 if _HAS_MANHOLE:
-    class ManholeService(object):
 
+    class ManholeService(object):
         """
         Manhole service running inside a native processes (controller, router, container).
 
         This class is for _internal_ use within NativeProcess.
         """
-
         def __init__(self, config, who):
             """
             Ctor.
@@ -105,11 +82,11 @@ if _HAS_MANHOLE:
             """
             now = datetime.utcnow()
             return {
-                u'created': utcstr(self.created),
-                u'status': self.status,
-                u'started': utcstr(self.started) if self.started else None,
-                u'uptime': (now - self.started).total_seconds() if self.started else None,
-                u'config': self.config
+                'created': utcstr(self.created),
+                'status': self.status,
+                'started': utcstr(self.started) if self.started else None,
+                'uptime': (now - self.started).total_seconds() if self.started else None,
+                'config': self.config
             }
 
 
@@ -119,7 +96,27 @@ class NativeProcess(ApplicationSession):
     """
     log = make_logger()
 
+    WORKER_TYPE = 'native'
+
+    def onUserError(self, fail, msg):
+        """
+        Implements :func:`autobahn.wamp.interfaces.ISession.onUserError`
+        """
+        if isinstance(fail.value, ApplicationError):
+            self.log.debug('{klass}.onUserError(): "{msg}"',
+                           klass=self.__class__.__name__,
+                           msg=fail.value.error_message())
+        else:
+            self.log.error(
+                '{klass}.onUserError(): "{msg}"\n{traceback}',
+                klass=self.__class__.__name__,
+                msg=msg,
+                traceback=txaio.failure_format_traceback(fail),
+            )
+
     def __init__(self, config=None, reactor=None, personality=None):
+        assert config is None or isinstance(config, ComponentConfig)
+
         # Twisted reactor
         if not reactor:
             from twisted.internet import reactor
@@ -135,6 +132,19 @@ class NativeProcess(ApplicationSession):
 
         # base ctor
         super(ApplicationSession, self).__init__(config=config)
+
+        self._realm = config.realm if config else None
+        self._node_id = config.extra.node if config and config.extra else None
+        self._worker_id = config.extra.worker if config and config.extra else None
+        self._uri_prefix = 'crossbar.worker.{}'.format(self._worker_id)
+
+    @property
+    def node_id(self):
+        return self._node_id
+
+    @property
+    def worker_id(self):
+        return self._worker_id
 
     def onConnect(self, do_join=True):
         if not hasattr(self, 'cbdir'):
@@ -152,10 +162,12 @@ class NativeProcess(ApplicationSession):
 
         if _HAS_PSUTIL:
             self._pinfo = ProcessInfo()
+            self._pmonitor = ProcessMonitor(self.WORKER_TYPE, {})
             self._pinfo_monitor = None
             self._pinfo_monitor_seq = 0
         else:
             self._pinfo = None
+            self._pmonitor = None
             self._pinfo_monitor = None
             self._pinfo_monitor_seq = None
             self.log.info("Process utilities not available")
@@ -171,16 +183,36 @@ class NativeProcess(ApplicationSession):
 
         regs = yield self.register(
             self,
-            prefix=u'{}.'.format(self._uri_prefix),
+            prefix='{}.'.format(self._uri_prefix),
             options=RegisterOptions(details_arg='details'),
         )
 
-        self.log.info("Registered {len_reg} procedures", len_reg=len(regs))
+        procs = []
+        errors = []
         for reg in regs:
             if isinstance(reg, Failure):
-                self.log.error("Failed to register: {f}", f=reg, log_failure=reg)
+                self.log.error("Failed to register management procedure: {f}", f=reg, log_failure=reg)
+                errors.append(str(reg))
             else:
-                self.log.debug('  {proc}', proc=reg.procedure)
+                procs.append(reg.procedure)
+
+        if errors:
+            raise ApplicationError('crossbar.error.cannot_start',
+                                   'management API could not be initialized',
+                                   errors=errors)
+        else:
+            self.log.debug('Ok, registered {len_reg} management procedures on realm "{realm}" [{func}]:\n\n{procs}\n',
+                           len_reg=hlval(len(regs)),
+                           realm=hl(self.realm),
+                           func=hltype(self.onJoin),
+                           procs=hl(pformat(procs), color='white', bold=True))
+
+        self.log.info('Native worker ready! (worker={worker}, node_id="{node_id}", worker_id="{worker_id}") [{func}]',
+                      node_id=hlid(self._node_id),
+                      worker_id=hlid(self._worker_id),
+                      cbdir=hlval(self.cbdir),
+                      worker=hlid(self.__class__.__name__),
+                      func=hltype(self.onJoin))
         returnValue(regs)
 
     @wamp.register(None)
@@ -198,7 +230,7 @@ class NativeProcess(ApplicationSession):
         if not _HAS_PSUTIL:
             emsg = "unable to get CPU count: required package 'psutil' is not installed"
             self.log.warn(emsg)
-            raise ApplicationError(u"crossbar.error.feature_unavailable", emsg)
+            raise ApplicationError("crossbar.error.feature_unavailable", emsg)
 
         return psutil.cpu_count(logical=logical)
 
@@ -212,7 +244,7 @@ class NativeProcess(ApplicationSession):
         if not _HAS_PSUTIL:
             emsg = "unable to get CPUs: required package 'psutil' is not installed"
             self.log.warn(emsg)
-            raise ApplicationError(u"crossbar.error.feature_unavailable", emsg)
+            raise ApplicationError("crossbar.error.feature_unavailable", emsg)
 
         return self._pinfo.cpus
 
@@ -227,7 +259,7 @@ class NativeProcess(ApplicationSession):
         if not _HAS_PSUTIL:
             emsg = "unable to get CPU affinity: required package 'psutil' is not installed"
             self.log.warn(emsg)
-            raise ApplicationError(u"crossbar.error.feature_unavailable", emsg)
+            raise ApplicationError("crossbar.error.feature_unavailable", emsg)
 
         try:
             p = psutil.Process(os.getpid())
@@ -235,7 +267,7 @@ class NativeProcess(ApplicationSession):
         except Exception as e:
             emsg = "Could not get CPU affinity: {}".format(e)
             self.log.failure(emsg)
-            raise ApplicationError(u"crossbar.error.runtime_error", emsg)
+            raise ApplicationError("crossbar.error.runtime_error", emsg)
         else:
             return current_affinity
 
@@ -255,7 +287,13 @@ class NativeProcess(ApplicationSession):
         if not _HAS_PSUTIL:
             emsg = "Unable to set CPU affinity: required package 'psutil' is not installed"
             self.log.warn(emsg)
-            raise ApplicationError(u"crossbar.error.feature_unavailable", emsg)
+            raise ApplicationError("crossbar.error.feature_unavailable", emsg)
+
+        if sys.platform.startswith('darwin'):
+            # https://superuser.com/questions/149312/how-to-set-processor-affinity-on-os-x
+            emsg = "Unable to set CPU affinity: OSX lacks process CPU affinity"
+            self.log.warn(emsg)
+            raise ApplicationError("crossbar.error.feature_unavailable", emsg)
 
         if relative:
             _cpu_ids = self._pinfo.cpus
@@ -268,21 +306,22 @@ class NativeProcess(ApplicationSession):
             p.cpu_affinity(_cpus)
             new_affinity = p.cpu_affinity()
             if set(_cpus) != set(new_affinity):
-                raise Exception('CPUs mismatch after affinity setting ({} != {})'.format(set(_cpus), set(new_affinity)))
+                raise Exception('CPUs mismatch after affinity setting ({} != {})'.format(
+                    set(_cpus), set(new_affinity)))
         except Exception as e:
             emsg = "Could not set CPU affinity: {}".format(e)
             self.log.failure(emsg)
-            raise ApplicationError(u"crossbar.error.runtime_error", emsg)
+            raise ApplicationError("crossbar.error.runtime_error", emsg)
         else:
 
             # publish info to all but the caller ..
             #
-            cpu_affinity_set_topic = u'{}.on_cpu_affinity_set'.format(self._uri_prefix)
+            cpu_affinity_set_topic = '{}.on_cpu_affinity_set'.format(self._uri_prefix)
             cpu_affinity_set_info = {
-                u'cpus': cpus,
-                u'relative': relative,
-                u'affinity': new_affinity,
-                u'who': details.caller
+                'cpus': cpus,
+                'relative': relative,
+                'affinity': new_affinity,
+                'who': details.caller
             }
             self.publish(cpu_affinity_set_topic, cpu_affinity_set_info, options=PublishOptions(exclude=details.caller))
 
@@ -297,8 +336,7 @@ class NativeProcess(ApplicationSession):
 
         :returns: Dictionary with process information.
         """
-        self.log.debug("{cls}.get_process_info",
-                       cls=self.__class__.__name__)
+        self.log.debug("{cls}.get_process_info", cls=self.__class__.__name__)
 
         if self._pinfo:
             # psutil.AccessDenied
@@ -306,7 +344,7 @@ class NativeProcess(ApplicationSession):
             return self._pinfo.get_info()
         else:
             emsg = "Could not retrieve process statistics: required packages not installed"
-            raise ApplicationError(u"crossbar.error.feature_unavailable", emsg)
+            raise ApplicationError("crossbar.error.feature_unavailable", emsg)
 
     @wamp.register(None)
     def get_process_stats(self, details=None):
@@ -321,7 +359,17 @@ class NativeProcess(ApplicationSession):
             return self._pinfo.get_stats()
         else:
             emsg = "Could not retrieve process statistics: required packages not installed"
-            raise ApplicationError(u"crossbar.error.feature_unavailable", emsg)
+            raise ApplicationError("crossbar.error.feature_unavailable", emsg)
+
+    @wamp.register(None)
+    def get_process_monitor(self, details=None):
+        self.log.debug("{cls}.get_process_monitor", cls=self.__class__.__name__)
+
+        if self._pmonitor:
+            return self._pmonitor.poll()
+        else:
+            emsg = "Could not retrieve process statistics: required packages not installed"
+            raise ApplicationError("crossbar.error.feature_unavailable", emsg)
 
     @wamp.register(None)
     def set_process_stats_monitoring(self, interval, details=None):
@@ -332,7 +380,8 @@ class NativeProcess(ApplicationSession):
         :type interval: float
         """
         self.log.debug("{cls}.set_process_stats_monitoring(interval = {interval})",
-                       cls=self.__class__.__name__, interval=interval)
+                       cls=self.__class__.__name__,
+                       interval=interval)
 
         if self._pinfo:
 
@@ -352,7 +401,7 @@ class NativeProcess(ApplicationSession):
                 def publish_stats():
                     stats = self._pinfo.get_stats()
                     self._pinfo_monitor_seq += 1
-                    stats[u'seq'] = self._pinfo_monitor_seq
+                    stats['seq'] = self._pinfo_monitor_seq
                     self.publish(stats_topic, stats)
 
                 self._pinfo_monitor = LoopingCall(publish_stats)
@@ -361,7 +410,7 @@ class NativeProcess(ApplicationSession):
                 self.publish(stats_monitor_set_topic, interval, options=PublishOptions(exclude=details.caller))
         else:
             emsg = "Cannot setup process statistics monitor: required packages not installed"
-            raise ApplicationError(u"crossbar.error.feature_unavailable", emsg)
+            raise ApplicationError("crossbar.error.feature_unavailable", emsg)
 
     @wamp.register(None)
     def trigger_gc(self, details=None):
@@ -405,20 +454,19 @@ class NativeProcess(ApplicationSession):
 
         duration = int(round(1000. * (rtime() - started)))
 
-        on_gc_finished = u'{}.on_gc_finished'.format(self._uri_prefix)
+        on_gc_finished = '{}.on_gc_finished'.format(self._uri_prefix)
         self.publish(
             on_gc_finished,
             {
-                u'requester': {
-                    u'session_id': details.caller,
+                'requester': {
+                    'session_id': details.caller,
                     # FIXME:
-                    u'auth_id': None,
-                    u'auth_role': None
+                    'auth_id': None,
+                    'auth_role': None
                 },
-                u'duration': duration
+                'duration': duration
             },
-            options=PublishOptions(exclude=details.caller)
-        )
+            options=PublishOptions(exclude=details.caller))
 
         return duration
 
@@ -477,29 +525,27 @@ class NativeProcess(ApplicationSession):
         :param config: Manhole service configuration.
         :type config: dict
         """
-        self.log.debug("{cls}.start_manhole(config = {config})",
-                       cls=self.__class__.__name__, config=config)
+        self.log.debug("{cls}.start_manhole(config = {config})", cls=self.__class__.__name__, config=config)
 
         if not _HAS_MANHOLE:
             emsg = "Could not start manhole: required packages are missing ({})".format(_MANHOLE_MISSING_REASON)
             self.log.error(emsg)
-            raise ApplicationError(u"crossbar.error.feature_unavailable", emsg)
+            raise ApplicationError("crossbar.error.feature_unavailable", emsg)
 
         if self._manhole_service:
             emsg = "Could not start manhole - already running (or starting)"
             self.log.warn(emsg)
-            raise ApplicationError(u"crossbar.error.already_started", emsg)
+            raise ApplicationError("crossbar.error.already_started", emsg)
 
         try:
             self.personality.check_manhole(self.personality, config)
         except Exception as e:
             emsg = "Could not start manhole: invalid configuration ({})".format(e)
             self.log.error(emsg)
-            raise ApplicationError(u'crossbar.error.invalid_configuration', emsg)
+            raise ApplicationError('crossbar.error.invalid_configuration', emsg)
 
         from twisted.conch.ssh import keys
-        from twisted.conch.manhole_ssh import (
-            ConchFactory, TerminalRealm, TerminalSession)
+        from twisted.conch.manhole_ssh import (ConchFactory, TerminalRealm, TerminalSession)
         from twisted.conch.manhole import ColoredManhole
         from twisted.conch.checkers import SSHPublicKeyDatabase
 
@@ -518,7 +564,8 @@ class NativeProcess(ApplicationSession):
         # setup user authentication
         #
         authorized_keys = {
-            'oberstet': 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCz7K1QwDhaq/Bi8o0uqiJQuVFCDQL5rbRvMClLHRx9KE3xP2Fh2eapzXuYGSgtG9Fyz1UQd+1oNM3wuNnT/DsBUBQrECP4bpFIHcJkMaFTARlCagkXosWsadzNnkW0osUCuHYMrzBJuXWF2GH+0OFCtVu+8E+4Mhvchu9xsHG8PM92SpI6aP0TtmT9D/0Bsm9JniRj8kndeS+iWG4s/pEGj7Rg7eGnbyQJt/9Jc1nWl6PngGbwp63dMVmh+8LP49PtfnxY8m9fdwpL4oW9U8beYqm8hyfBPN2yDXaehg6RILjIa7LU2/6bu96ZgnIz26zi/X9XlnJQt2aahWJs1+GR oberstet@thinkpad-t430s'
+            'oberstet':
+            'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCz7K1QwDhaq/Bi8o0uqiJQuVFCDQL5rbRvMClLHRx9KE3xP2Fh2eapzXuYGSgtG9Fyz1UQd+1oNM3wuNnT/DsBUBQrECP4bpFIHcJkMaFTARlCagkXosWsadzNnkW0osUCuHYMrzBJuXWF2GH+0OFCtVu+8E+4Mhvchu9xsHG8PM92SpI6aP0TtmT9D/0Bsm9JniRj8kndeS+iWG4s/pEGj7Rg7eGnbyQJt/9Jc1nWl6PngGbwp63dMVmh+8LP49PtfnxY8m9fdwpL4oW9U8beYqm8hyfBPN2yDXaehg6RILjIa7LU2/6bu96ZgnIz26zi/X9XlnJQt2aahWJs1+GR oberstet@thinkpad-t430s'
         }
         checker = PublicKeyChecker(authorized_keys)
 
@@ -546,12 +593,8 @@ class NativeProcess(ApplicationSession):
         private_key = keys.Key.fromFile(os.path.join(self.cbdir, 'ssh_host_rsa_key'))
         public_key = private_key.public()
 
-        publicKeys = {
-            b'ssh-rsa': public_key
-        }
-        privateKeys = {
-            b'ssh-rsa': private_key
-        }
+        publicKeys = {b'ssh-rsa': public_key}
+        privateKeys = {b'ssh-rsa': private_key}
         factory.publicKeys = publicKeys
         factory.privateKeys = privateKeys
 
@@ -568,16 +611,13 @@ class NativeProcess(ApplicationSession):
         self.publish(starting_topic, starting_info, options=PublishOptions(exclude=details.caller))
 
         try:
-            self._manhole_service.port = yield create_listening_port_from_config(config['endpoint'],
-                                                                                 self.cbdir,
-                                                                                 factory,
-                                                                                 self._reactor,
-                                                                                 self.log)
+            self._manhole_service.port = yield create_listening_port_from_config(config['endpoint'], self.cbdir,
+                                                                                 factory, self._reactor, self.log)
         except Exception as e:
             self._manhole_service = None
             emsg = "Manhole service endpoint cannot listen: {}".format(e)
             self.log.error(emsg)
-            raise ApplicationError(u"crossbar.error.cannot_listen", emsg)
+            raise ApplicationError("crossbar.error.cannot_listen", emsg)
 
         # alright, manhole has started
         self._manhole_service.started = datetime.utcnow()
@@ -618,11 +658,11 @@ class NativeProcess(ApplicationSession):
 
         if not self._manhole_service or self._manhole_service.status != 'started':
             emsg = "Cannot stop manhole: not running (or already shutting down)"
-            raise ApplicationError(u"crossbar.error.not_started", emsg)
+            raise ApplicationError("crossbar.error.not_started", emsg)
 
         self._manhole_service.status = 'stopping'
 
-        stopping_topic = u'{}.on_manhole_stopping'.format(self._uri_prefix)
+        stopping_topic = '{}.on_manhole_stopping'.format(self._uri_prefix)
         stopping_info = None
 
         # the caller gets a progressive result ..
@@ -639,7 +679,7 @@ class NativeProcess(ApplicationSession):
 
         self._manhole_service = None
 
-        stopped_topic = u'{}.on_manhole_stopped'.format(self._uri_prefix)
+        stopped_topic = '{}.on_manhole_stopped'.format(self._uri_prefix)
         stopped_info = None
         self.publish(stopped_topic, stopped_info, options=PublishOptions(exclude=details.caller))
 
@@ -657,7 +697,7 @@ class NativeProcess(ApplicationSession):
         if not _HAS_MANHOLE:
             emsg = "Could not start manhole: required packages are missing ({})".format(_MANHOLE_MISSING_REASON)
             self.log.error(emsg)
-            raise ApplicationError(u"crossbar.error.feature_unavailable", emsg)
+            raise ApplicationError("crossbar.error.feature_unavailable", emsg)
 
         if not self._manhole_service:
             return None

@@ -1,37 +1,11 @@
 #####################################################################################
 #
-#  Copyright (c) Crossbar.io Technologies GmbH
-#
-#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
-#  you have purchased a commercial license), the license terms below apply.
-#
-#  Should you enter into a separate license agreement after having received a copy of
-#  this software, then the terms of such license agreement replace the terms below at
-#  the time at which such license agreement becomes effective.
-#
-#  In case a separate license agreement ends, and such agreement ends without being
-#  replaced by another separate license agreement, the license terms below apply
-#  from the time at which said agreement ends.
-#
-#  LICENSE TERMS
-#
-#  This program is free software: you can redistribute it and/or modify it under the
-#  terms of the GNU Affero General Public License, version 3, as published by the
-#  Free Software Foundation. This program is distributed in the hope that it will be
-#  useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
-#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-#
-#  See the GNU Affero General Public License Version 3 for more details.
-#
-#  You should have received a copy of the GNU Affero General Public license along
-#  with this program. If not, see <http://www.gnu.org/licenses/agpl-3.0.en.html>.
+#  Copyright (c) typedef int GmbH
+#  SPDX-License-Identifier: EUPL-1.2
 #
 #####################################################################################
 
-from __future__ import absolute_import
-
 import json
-import six
 
 from collections import deque
 
@@ -52,10 +26,7 @@ from autobahn.wamp.exception import SerializationError, \
 from txaio import make_logger
 from txaio import failure_format_traceback, failure_message, create_failure
 
-
-__all__ = (
-    'WampLongPollResource',
-)
+__all__ = ('WampLongPollResource', )
 
 
 class WampLongPollResourceSessionSend(Resource):
@@ -100,10 +71,7 @@ class WampLongPollResourceSessionSend(Resource):
                 msg=failure_message(f),
             )
             self.log.debug("{tb}", tb=failure_format_traceback(f))
-            return self._parent._parent._fail_request(
-                request,
-                b"could not unserialize WAMP message."
-            )
+            return self._parent._parent._fail_request(request, b"could not unserialize WAMP message.")
 
         else:
             request.setResponseCode(http.NO_CONTENT)
@@ -135,6 +103,7 @@ class WampLongPollResourceSessionReceive(Resource):
 
         # FIXME: can we read the loglevel from self.log currently set?
         if False:
+
             def logqueue():
                 if not self._killed:
                     self.log.debug(
@@ -145,6 +114,7 @@ class WampLongPollResourceSessionReceive(Resource):
                         pending=len(self._queue),
                     )
                     self.reactor.callLater(1, logqueue)
+
             logqueue()
 
     def queue(self, data):
@@ -180,7 +150,7 @@ class WampLongPollResourceSessionReceive(Resource):
             else:
                 # in unbatched mode, only write 1 pending message
                 msg = self._queue.popleft()
-                if type(msg) == six.binary_type:
+                if isinstance(msg, bytes):
                     self._request.write(msg)
                 else:
                     self.log.error(
@@ -205,7 +175,7 @@ class WampLongPollResourceSessionReceive(Resource):
 
         self._parent._parent._set_standard_headers(request)
         mime_type = self._parent._serializer.MIME_TYPE
-        if type(mime_type) == six.text_type:
+        if isinstance(mime_type, str):
             mime_type = mime_type.encode('utf8')
         request.setHeader(b'content-type', mime_type)
 
@@ -310,6 +280,7 @@ class WampLongPollResourceSession(Resource):
         #
         killAfter = self._parent._killAfter
         if killAfter > 0:
+
             def killIfDead():
                 if not self._isalive:
                     self.log.debug(
@@ -347,10 +318,7 @@ class WampLongPollResourceSession(Resource):
     def render_GET(self, request):
         self._parent._set_standard_headers(request)
 
-        res = {
-            u'transport': self._transport_id,
-            u'session': self._session._session_id if self._session else None
-        }
+        res = {'transport': self._transport_id, 'session': self._session._session_id if self._session else None}
         return json.dumps(res).encode()
 
     def close(self):
@@ -358,7 +326,7 @@ class WampLongPollResourceSession(Resource):
         Implements :func:`autobahn.wamp.interfaces.ITransport.close`
         """
         if self.isOpen():
-            self.onClose(True, 1000, u"session closed")
+            self.onClose(True, 1000, "session closed")
             self._receive._kill()
             del self._parent._transports[self._transport_id]
         else:
@@ -369,7 +337,7 @@ class WampLongPollResourceSession(Resource):
         Implements :func:`autobahn.wamp.interfaces.ITransport.abort`
         """
         if self.isOpen():
-            self.onClose(True, 1000, u"session aborted")
+            self.onClose(True, 1000, "session aborted")
             self._receive._kill()
             del self._parent._transports[self._transport_id]
         else:
@@ -477,17 +445,17 @@ class WampLongPollResourceOpen(Resource):
             self.log.debug("{msg}", msg=failure_format_traceback(f))
             return self._parent._fail_request(request, b"could not parse WAMP session open request body")
 
-        if type(options) != dict:
+        if not isinstance(options, dict):
             return self._parent._fail_request(request, b"invalid type for WAMP session open request")
 
-        if u'protocols' not in options:
+        if 'protocols' not in options:
             return self._parent._fail_request(request, "missing attribute 'protocols' in WAMP session open request")
 
         # determine the protocol to speak
         #
         protocol = None
         serializer = None
-        for p in options[u'protocols']:
+        for p in options['protocols']:
             version, serializerId = parseSubprotocolIdentifier(p)
             if version == 2 and serializerId in self._parent._serializers.keys():
                 serializer = self._parent._serializers[serializerId]
@@ -496,10 +464,8 @@ class WampLongPollResourceOpen(Resource):
 
         if protocol is None:
             return self._fail_request(
-                request,
-                b"no common protocol to speak (I speak: {0})".format(
-                    ["wamp.2.{0}".format(s) for s in self._parent._serializers.keys()])
-            )
+                request, b"no common protocol to speak (I speak: {0})".format(
+                    ["wamp.2.{0}".format(s) for s in self._parent._serializers.keys()]))
 
         # make up new transport ID
         #
@@ -518,12 +484,12 @@ class WampLongPollResourceOpen(Resource):
             http_headers_received[key].extend(values)
 
         transport_details = {
-            u'transport': transport,
-            u'serializer': serializer,
-            u'protocol': protocol,
-            u'peer': request.getClientIP(),
-            u'http_headers_received': http_headers_received,
-            u'http_headers_sent': None
+            'transport': transport,
+            'serializer': serializer,
+            'protocol': protocol,
+            'peer': request.getClientIP(),
+            'http_headers_received': http_headers_received,
+            'http_headers_sent': None
         }
 
         # create instance of WampLongPollResourceSession or subclass thereof ..
@@ -535,17 +501,9 @@ class WampLongPollResourceOpen(Resource):
         self._parent._set_standard_headers(request)
         request.setHeader(b'content-type', b'application/json; charset=utf-8')
 
-        result = {
-            u'transport': transport,
-            u'protocol': protocol
-        }
+        result = {'transport': transport, 'protocol': protocol}
 
-        self.log.debug(
-            "WampLongPoll: new session created on transport"
-            " '{transport}'".format(
-                transport=transport,
-            )
-        )
+        self.log.debug("WampLongPoll: new session created on transport" " '{transport}'".format(transport=transport, ))
 
         payload = json.dumps(result)
         return payload.encode()
@@ -696,7 +654,8 @@ class WampLongPollResource(Resource):
                 self.log.error("No WAMP transport '{name}'", name=name)
                 return NoResource("no WAMP transport '{0}'".format(name))
 
-        if len(request.postpath) == 0 or (len(request.postpath) == 1 and request.postpath[0] in [b'send', b'receive', b'close']):
+        if len(request.postpath) == 0 or (len(request.postpath) == 1
+                                          and request.postpath[0] in [b'send', b'receive', b'close']):
             return self._transports[name]
         else:
             return NoResource("invalid WAMP transport operation '{0}'".format(request.postpath))
@@ -763,5 +722,5 @@ class WampLongPollResource(Resource):
       <p>I am not Web server, but a <b>WAMP-over-Longpoll</b> listening transport.</p>
    </body>
 </html>
-""" % (redirect,)
+""" % (redirect, )
         return html

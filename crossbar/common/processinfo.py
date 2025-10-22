@@ -1,38 +1,15 @@
 #####################################################################################
 #
-#  Copyright (c) Crossbar.io Technologies GmbH
-#
-#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
-#  you have purchased a commercial license), the license terms below apply.
-#
-#  Should you enter into a separate license agreement after having received a copy of
-#  this software, then the terms of such license agreement replace the terms below at
-#  the time at which such license agreement becomes effective.
-#
-#  In case a separate license agreement ends, and such agreement ends without being
-#  replaced by another separate license agreement, the license terms below apply
-#  from the time at which said agreement ends.
-#
-#  LICENSE TERMS
-#
-#  This program is free software: you can redistribute it and/or modify it under the
-#  terms of the GNU Affero General Public License, version 3, as published by the
-#  Free Software Foundation. This program is distributed in the hope that it will be
-#  useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
-#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-#
-#  See the GNU Affero General Public License Version 3 for more details.
-#
-#  You should have received a copy of the GNU Affero General Public license along
-#  with this program. If not, see <http://www.gnu.org/licenses/agpl-3.0.en.html>.
+#  Copyright (c) typedef int GmbH
+#  SPDX-License-Identifier: EUPL-1.2
 #
 #####################################################################################
 
-from __future__ import absolute_import
-
+import os
 import sys
 import socket
 
+from txaio import time_ns
 from autobahn.util import utcnow
 
 try:
@@ -44,10 +21,8 @@ else:
 
 __all__ = ('SystemInfo', 'ProcessInfo')
 
-
 # http://pythonhosted.org/psutil/
 # http://linux.die.net/man/5/proc
-
 
 if _HAS_PSUTIL:
 
@@ -57,30 +32,25 @@ if _HAS_PSUTIL:
         _HAS_AF_UNIX = True
 
     class SystemInfo:
-
         """
         Access system global information and statistics.
         """
-
         def __init__(self):
             """
             """
 
         def cpu(self):
-            return {
-                u'physical_count': psutil.cpu_count(logical=False),
-                u'logical_count': psutil.cpu_count(logical=True)
-            }
+            return {'physical_count': psutil.cpu_count(logical=False), 'logical_count': psutil.cpu_count(logical=True)}
 
         def stats(self):
             """
             """
             res = {}
-            res[u'ts'] = utcnow()
-            res[u'cpu'] = self.cpu_stats()
-            res[u'mem'] = self.mem_stats()
-            res[u'net'] = self.net_stats()
-            res[u'disk'] = self.disk_stats()
+            res['ts'] = utcnow()
+            res['cpu'] = self.cpu_stats()
+            res['mem'] = self.mem_stats()
+            res['net'] = self.net_stats()
+            res['disk'] = self.disk_stats()
             return res
 
         def cpu_stats(self):
@@ -90,19 +60,15 @@ if _HAS_PSUTIL:
             res = {}
             i = 0
             for c in psutil.cpu_times(percpu=True):
-                res[i] = {
-                    u'user': c.user,
-                    u'system': c.system,
-                    u'idle': c.idle
-                }
+                res[i] = {'user': c.user, 'system': c.system, 'idle': c.idle}
                 i += 1
             return res
 
         def mem_stats(self):
             res = {}
             m = psutil.virtual_memory()
-            res[u'total'] = m.total
-            res[u'available'] = m.available
+            res['total'] = m.total
+            res['available'] = m.available
             return res
 
         def net_stats(self):
@@ -114,17 +80,17 @@ if _HAS_PSUTIL:
             for nic in ns.keys():
                 stats = ns[nic]
                 res[nic] = {
-                    u'out': {
-                        u'bytes': stats.bytes_sent,
-                        u'packets': stats.packets_sent,
-                        u'errors': stats.errout,
-                        u'dropped': stats.dropout
+                    'out': {
+                        'bytes': stats.bytes_sent,
+                        'packets': stats.packets_sent,
+                        'errors': stats.errout,
+                        'dropped': stats.dropout
                     },
-                    u'in': {
-                        u'bytes': stats.bytes_recv,
-                        u'packets': stats.packets_recv,
-                        u'errors': stats.errin,
-                        u'dropped': stats.dropin
+                    'in': {
+                        'bytes': stats.bytes_recv,
+                        'packets': stats.packets_recv,
+                        'errors': stats.errin,
+                        'dropped': stats.dropin
                     }
                 }
             return res
@@ -138,21 +104,20 @@ if _HAS_PSUTIL:
             for disk in ds.keys():
                 stats = ds[disk]
                 res[disk] = {
-                    u'read': {
-                        u'ops': stats.read_count,
-                        u'bytes': stats.read_bytes,
-                        u'time': stats.read_time
+                    'read': {
+                        'ops': stats.read_count,
+                        'bytes': stats.read_bytes,
+                        'time': stats.read_time
                     },
-                    u'write': {
-                        u'ops': stats.write_count,
-                        u'bytes': stats.write_bytes,
-                        u'time': stats.write_time
+                    'write': {
+                        'ops': stats.write_count,
+                        'bytes': stats.write_bytes,
+                        'time': stats.write_time
                     }
                 }
             return res
 
     class ProcessInfo(object):
-
         """
         Access process related information and statistics
         """
@@ -176,9 +141,17 @@ if _HAS_PSUTIL:
                 the given PID, otherwise track the current process.
             :type pid: int
             """
-            self._pid = pid
-            self._p = psutil.Process(pid)
-            self._cpus = sorted(self._p.cpu_affinity())
+            self._pid = pid or os.getpid()
+            self._p = psutil.Process(self._pid)
+            if hasattr(self._p, 'cpu_affinity'):
+                self._cpus = sorted(self._p.cpu_affinity())
+            else:
+                # osx lacks CPU process affinity altogether, and
+                # only has thread affinity (since osx 10.5)
+                # => if you can't make it, fake it;)
+                # https://superuser.com/questions/149312/how-to-set-processor-affinity-on-os-x
+                import multiprocessing
+                self._cpus = list(range(multiprocessing.cpu_count()))
 
         @property
         def cpus(self):
@@ -189,7 +162,9 @@ if _HAS_PSUTIL:
             Get process statistics.
             """
             res = {}
-            res[u'ts'] = utcnow()
+            res['ts'] = utcnow()
+            res['time'] = time_ns()
+            res['pid'] = self._pid
 
             s = self._p.num_ctx_switches()
 
@@ -202,25 +177,25 @@ if _HAS_PSUTIL:
             f = self._p.io_counters()
 
             # process status
-            res[u'status'] = self._p.status()
+            res['status'] = self._p.status()
 
             # context switches
-            res[u'voluntary'] = s[0]
-            res[u'nonvoluntary'] = s[1]
+            res['voluntary'] = s[0]
+            res['nonvoluntary'] = s[1]
 
             # cpu
-            res[u'user'] = c.user
-            res[u'system'] = c.system
-            res[u'cpu_percent'] = c_perc
+            res['user'] = c.user
+            res['system'] = c.system
+            res['cpu_percent'] = c_perc
 
             # memory
-            res[u'resident'] = m.rss
-            res[u'virtual'] = m.vms
-            res[u'mem_percent'] = m_perc
+            res['resident'] = m.rss
+            res['virtual'] = m.vms
+            res['mem_percent'] = m_perc
 
             # disk
-            res[u'reads'] = f.read_count
-            res[u'writes'] = f.write_count
+            res['reads'] = f.read_count
+            res['writes'] = f.write_count
             return res
 
         def get_info(self):
@@ -237,10 +212,10 @@ if _HAS_PSUTIL:
                 pass
             cnt_threads = self._p.num_threads()
             res = {
-                u'descriptors': descriptors,
-                u'threads': cnt_threads,
-                u'files': self.open_files(),
-                u'sockets': self.open_sockets()
+                'descriptors': descriptors,
+                'threads': cnt_threads,
+                'files': self.open_files(),
+                'sockets': self.open_sockets()
             }
             return res
 
@@ -273,10 +248,5 @@ if _HAS_PSUTIL:
                     else:
                         raddr = ""
                 status = str(c.status)
-                res.append({
-                    u'type': socket_type,
-                    u'local': laddr,
-                    u'remote': raddr,
-                    u'status': status
-                })
+                res.append({'type': socket_type, 'local': laddr, 'remote': raddr, 'status': status})
             return res

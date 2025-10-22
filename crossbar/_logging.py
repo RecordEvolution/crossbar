@@ -1,39 +1,13 @@
 #####################################################################################
 #
-#  Copyright (c) Crossbar.io Technologies GmbH
-#
-#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
-#  you have purchased a commercial license), the license terms below apply.
-#
-#  Should you enter into a separate license agreement after having received a copy of
-#  this software, then the terms of such license agreement replace the terms below at
-#  the time at which such license agreement becomes effective.
-#
-#  In case a separate license agreement ends, and such agreement ends without being
-#  replaced by another separate license agreement, the license terms below apply
-#  from the time at which said agreement ends.
-#
-#  LICENSE TERMS
-#
-#  This program is free software: you can redistribute it and/or modify it under the
-#  terms of the GNU Affero General Public License, version 3, as published by the
-#  Free Software Foundation. This program is distributed in the hope that it will be
-#  useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
-#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-#
-#  See the GNU Affero General Public License Version 3 for more details.
-#
-#  You should have received a copy of the GNU Affero General Public license along
-#  with this program. If not, see <http://www.gnu.org/licenses/agpl-3.0.en.html>.
+#  Copyright (c) typedef int GmbH
+#  SPDX-License-Identifier: EUPL-1.2
 #
 #####################################################################################
-
-from __future__ import absolute_import, division, print_function
 
 import os
 import sys
 import re
-import six
 import json
 from io import StringIO
 
@@ -51,8 +25,8 @@ from txaio.tx import log_levels
 
 from crossbar import _log_categories
 
-record_separator = u"\x1e"
-cb_logging_aware = u"CROSSBAR_RICH_LOGGING_ENABLE=True"
+record_separator = "\x1e"
+cb_logging_aware = "CROSSBAR_RICH_LOGGING_ENABLE=True"
 
 try:
     from colorama import Fore
@@ -76,11 +50,12 @@ except ImportError:
         LIGHTMAGENTA_EX = ""
         LIGHTCYAN_EX = ""
         LIGHTWHITE_EX = ""
+
     Fore = _Fore()
 
-STANDARD_FORMAT = u"{startcolor}{time} [{system}]{endcolor} {text}"
-SYSLOGD_FORMAT = u"{startcolor}[{system}]{endcolor} {text}"
-NONE_FORMAT = u"{text}"
+STANDARD_FORMAT = "{startcolor}{time} [{system}]{endcolor} {text}"
+SYSLOGD_FORMAT = "{startcolor}[{system}]{endcolor} {text}"
+NONE_FORMAT = "{text}"
 
 # A regex that matches ANSI escape sequences
 # http://stackoverflow.com/a/33925425
@@ -98,12 +73,16 @@ def escape_formatting(text):
     """
     Escape things that would otherwise confuse `.format`.
     """
-    return text.replace(u"{", u"{{").replace(u"}", u"}}")
+    return text.replace("{", "{{").replace("}", "}}")
 
 
-def make_stdout_observer(levels=(LogLevel.info,),
-                         show_source=False, format="standard", trace=False,
-                         color=False, _file=None, _categories=None):
+def make_stdout_observer(levels=(LogLevel.info, ),
+                         show_source=False,
+                         format="standard",
+                         trace=False,
+                         color=False,
+                         _file=None,
+                         _categories=None):
     """
     Create an observer which prints logs to L{sys.stdout}.
     """
@@ -157,25 +136,30 @@ def make_stdout_observer(levels=(LogLevel.info,),
             else:
                 fore = Fore.WHITE
 
-            eventString = FORMAT_STRING.format(
-                startcolor=fore, time=formatTime(event["log_time"]),
-                system=logSystem, endcolor=Fore.RESET,
-                text=formatEvent(event))
+            eventString = FORMAT_STRING.format(startcolor=fore,
+                                               time=formatTime(event["log_time"]),
+                                               system=logSystem,
+                                               endcolor=Fore.RESET,
+                                               text=formatEvent(event))
         else:
-            eventString = strip_ansi(FORMAT_STRING.format(
-                startcolor=u'', time=formatTime(event["log_time"]),
-                system=logSystem, endcolor=u'',
-                text=formatEvent(event)))
+            eventString = strip_ansi(
+                FORMAT_STRING.format(startcolor='',
+                                     time=formatTime(event["log_time"]),
+                                     system=logSystem,
+                                     endcolor='',
+                                     text=formatEvent(event)))
 
         print(eventString, file=_file)
 
     return StandardOutObserver
 
 
-def make_stderr_observer(levels=(LogLevel.warn, LogLevel.error,
-                                 LogLevel.critical),
-                         show_source=False, format="standard",
-                         color=False, _file=None, _categories=None):
+def make_stderr_observer(levels=(LogLevel.warn, LogLevel.error, LogLevel.critical),
+                         show_source=False,
+                         format="standard",
+                         color=False,
+                         _file=None,
+                         _categories=None):
     """
     Create an observer which prints logs to L{sys.stderr}.
     """
@@ -191,8 +175,8 @@ def make_stderr_observer(levels=(LogLevel.warn, LogLevel.error,
         if event["log_level"] not in levels:
             return
 
-        if event.get("log_system", u"-") == u"-":
-            logSystem = u"{:<10} {:>6}".format("Controller", os.getpid())
+        if event.get("log_system", "-") == "-":
+            logSystem = "{:<10} {:>6}".format("Controller", os.getpid())
         else:
             logSystem = event["log_system"]
 
@@ -208,7 +192,7 @@ def make_stderr_observer(levels=(LogLevel.warn, LogLevel.error,
         if event.get("log_format", None) is not None:
             eventText = formatEvent(event)
         else:
-            eventText = u""
+            eventText = ""
 
         if "log_failure" in event:
             # This is a traceback. Print it.
@@ -227,15 +211,18 @@ def make_stderr_observer(levels=(LogLevel.warn, LogLevel.error,
             # Errors are always red.
             fore = Fore.RED
 
-            eventString = FORMAT_STRING.format(
-                startcolor=fore, time=formatTime(event["log_time"]),
-                system=logSystem, endcolor=Fore.RESET,
-                text=eventText)
+            eventString = FORMAT_STRING.format(startcolor=fore,
+                                               time=formatTime(event["log_time"]),
+                                               system=logSystem,
+                                               endcolor=Fore.RESET,
+                                               text=eventText)
         else:
-            eventString = strip_ansi(FORMAT_STRING.format(
-                startcolor=u'', time=formatTime(event["log_time"]),
-                system=logSystem, endcolor=u'',
-                text=eventText))
+            eventString = strip_ansi(
+                FORMAT_STRING.format(startcolor='',
+                                     time=formatTime(event["log_time"]),
+                                     system=logSystem,
+                                     endcolor='',
+                                     text=eventText))
 
         print(eventString, file=_file)
 
@@ -249,6 +236,7 @@ def make_JSON_observer(outFile):
     class CrossbarEncoder(JSONEncoder):
         def default(self, o):
             return escape_formatting(repr(o))
+
     encoder = CrossbarEncoder()
 
     @provider(ILogObserver)
@@ -263,10 +251,7 @@ def make_JSON_observer(outFile):
         if log_levels.index(level) > log_levels.index(get_global_log_level()):
             return
 
-        done_json = {
-            "level": level,
-            "namespace": event.pop("log_namespace", '')
-        }
+        done_json = {"level": level, "namespace": event.pop("log_namespace", '')}
 
         eventText = formatEvent(event)
 
@@ -274,13 +259,7 @@ def make_JSON_observer(outFile):
             # This is a traceback. Print it.
             traceback = event["log_failure"].getTraceback()
 
-            if not six.PY3:
-                traceback = traceback.decode('utf-8')
-                linesep = os.linesep.decode('utf-8')
-            else:
-                linesep = os.linesep
-
-            eventText = eventText + linesep + traceback
+            eventText = eventText + os.linesep + traceback
 
         done_json["text"] = escape_formatting(eventText)
 
@@ -296,12 +275,9 @@ def make_JSON_observer(outFile):
             text = encoder.encode(event)
 
         except Exception:
-            text = encoder.encode({
-                "text": done_json["text"],
-                "level": "error",
-                "namespace": "crossbar._logging"})
+            text = encoder.encode({"text": done_json["text"], "level": "error", "namespace": "crossbar._logging"})
 
-        if not isinstance(text, six.text_type):
+        if not isinstance(text, str):
             text = text.decode('utf8')
 
         print(text, end=record_separator, file=outFile)
@@ -321,8 +297,8 @@ def make_logfile_observer(path, show_source=False):
 
     def _render(event):
 
-        if event.get("log_system", u"-") == u"-":
-            logSystem = u"{:<10} {:>6}".format("Controller", os.getpid())
+        if event.get("log_system", "-") == "-":
+            logSystem = "{:<10} {:>6}".format("Controller", os.getpid())
         else:
             logSystem = event["log_system"]
 
@@ -332,16 +308,16 @@ def make_logfile_observer(path, show_source=False):
         if event.get("log_format", None) is not None:
             eventText = formatEvent(event)
         else:
-            eventText = u""
+            eventText = ""
 
         if "log_failure" in event:
             # This is a traceback. Print it.
             eventText = eventText + event["log_failure"].getTraceback()
 
-        eventString = strip_ansi(STANDARD_FORMAT.format(
-            startcolor=u'', time=formatTime(event["log_time"]),
-            system=logSystem, endcolor=u'',
-            text=eventText)) + os.linesep
+        eventString = strip_ansi(
+            STANDARD_FORMAT.format(
+                startcolor='', time=formatTime(
+                    event["log_time"]), system=logSystem, endcolor='', text=eventText)) + os.linesep
 
         return eventString
 
@@ -353,7 +329,7 @@ def color_json(json_str):
     Given an already formatted JSON string, return a colored variant which will
     produce colored output on terminals.
     """
-    assert(type(json_str) == six.text_type)
+    assert (isinstance(json_str, str))
     return highlight(json_str, lexers.JsonLexer(), formatters.TerminalFormatter())
 
 
@@ -366,8 +342,7 @@ class JSON(object):
         self._item = item
 
     def __str__(self):
-        json_str = json.dumps(self._item, separators=(', ', ': '),
-                              sort_keys=False, indent=3, ensure_ascii=False)
+        json_str = json.dumps(self._item, separators=(', ', ': '), sort_keys=False, indent=3, ensure_ascii=False)
         output_str = os.linesep + color_json(json_str)
 
         if bytes == str:
@@ -388,9 +363,10 @@ class LogCapturer(object):
         self.desired_level = level
         self.log_text = StringIO()
 
-        self._out_observer = make_stdout_observer(
-            levels=(LogLevel.debug, LogLevel.info, LogLevel.warn,
-                    LogLevel.error), _file=self.log_text, trace=True)
+        self._out_observer = make_stdout_observer(levels=(LogLevel.debug, LogLevel.info, LogLevel.warn,
+                                                          LogLevel.error),
+                                                  _file=self.log_text,
+                                                  trace=True)
 
     def get_category(self, identifier):
         """

@@ -5,7 +5,6 @@ all:
 	@echo ""
 	@echo "   clean            Cleanup"
 	@echo "   test             Run unit tests"
-	@echo "   flake8           Run flake tests"
 	@echo "   install          Local install"
 	@echo "   publish          Clean build and publish to PyPI"
 	@echo "   docs             Build and test docs"
@@ -24,51 +23,21 @@ clean:
 	rm -f .coverage
 	rm -rf ./htmlcov
 	-rm -rf ./_trial*
+	-rm -rf ./pip-wheel-metadata
+	-rm -rf ./docs/_build
+	-rm -rf ./.mypy_cache
+	-rm -rf ./.pytest_cache
 	find . -name "*.db" -exec rm -f {} \;
 	find . -name "*.pyc" -exec rm -f {} \;
 	find . -name "*.log" -exec rm -f {} \;
 	# Learn to love the shell! http://unix.stackexchange.com/a/115869/52500
 	find . \( -name "*__pycache__" -type d \) -prune -exec rm -rf {} +
 
-
-# Targets for Sphinx-based documentation
-#
-docs_clean:
-	-rm -rf ./rtd/_build
-
-docs_builds:
-	sphinx-build -b html rtd rtd/_build
-
-# spellcheck the docs
-docs_spelling:
-	sphinx-build -b spelling -d rtd/_build/doctrees rtd rtd/_build/spelling
-
-
-# call this in a fresh virtualenv to update our frozen requirements.txt!
-freeze: clean
-	pip install -U virtualenv
-	virtualenv vers
-	vers/bin/pip install -r requirements-min.txt
-	vers/bin/pip freeze --all | grep -v -e "wheel" -e "pip" -e "distribute" > requirements-pinned.txt
-	vers/bin/pip install hashin
-	rm requirements.txt
-	cat requirements-pinned.txt | xargs vers/bin/hashin > requirements.txt
-
-wheel:
-	LMDB_FORCE_CFFI=1 SODIUM_INSTALL=bundled pip wheel --require-hashes --wheel-dir ./wheels -r requirements.txt
-
 # install for development, using pinned dependencies, and including dev-only dependencies
 install:
 	-pip uninstall -y crossbar
 	pip install --no-cache --upgrade -r requirements-dev.txt
 	pip install -e .
-	@python -c "import crossbar; print('*** crossbar-{} ***'.format(crossbar.__version__))"
-
-# install using pinned/hashed dependencies, as we do for packaging
-install_pinned:
-	-pip uninstall -y crossbar
-	LMDB_FORCE_CFFI=1 SODIUM_INSTALL=bundled pip install --ignore-installed --require-hashes -r requirements.txt
-	pip install .
 	@python -c "import crossbar; print('*** crossbar-{} ***'.format(crossbar.__version__))"
 
 # upload to our internal deployment system
@@ -81,85 +50,114 @@ publish: clean
 	python setup.py sdist bdist_wheel
 	twine upload dist/*
 
-test_trial: flake8
-	trial crossbar
+# auto-format code - WARNING: this my change files, in-place!
+autoformat:
+	yapf -ri --style=yapf.ini \
+		--exclude="crossbar/shell/reflection/*" \
+		--exclude="crossbar/master/database/*" \
+		--exclude="crossbar/worker/test/examples/syntaxerror.py" \
+		crossbar
 
-test_full:
-	crossbar \
-		--personality=standalone \
-		--debug-lifecycle \
-		--debug-programflow\
-		start \
-		--cbdir=./test/full/.crossbar
+# freeze our dependencies
+freeze:
+	# do everything in a fresh environment
+	-rm -rf vers
+	virtualenv vers
+	vers/bin/pip3 install -U pip setuptools wheel hashin pip-licenses
 
-test_manhole:
-	ssh -vvv -p 6022 oberstet@localhost
+	# install and freeze latest versions of minimum requirements
+	vers/bin/pip3 install -r requirements-min.txt
+	vers/bin/pip3 freeze --all | grep -v -e "wheel" -e "pip" -e "distribute" > requirements-pinned.txt
 
-gen_ssh_keys:
-#	ssh-keygen -t ed25519 -f test/full/.crossbar/ssh_host_ed25519_key
-	ssh-keygen -t rsa -b 4096 -f test/full/.crossbar/ssh_host_rsa_key
+	# persist OSS license list of our exact dependencies
+	vers/bin/pip-licenses --from=classifier -a -o name > LICENSES-OSS
+	vers/bin/pip-licenses --from=classifier -a -o name --format=rst > docs/soss_licenses_table.rst
+	sed -i '1s;^;OSS Licenses\n============\n\n;' docs/soss_licenses_table.rst
 
-test_coverage:
-	tox -e coverage .
+	# hash all dependencies for repeatable builds
+	vers/bin/pip3 install hashin
+	-rm requirements.txt
+	# FIXME: we are using our own unpublished forks of "py-cid" and "py-multihash" for which hashin won't find version data on pypi
+	-cat requirements-pinned.txt | grep -v "py-cid" | grep -v "py-multihash" | xargs vers/bin/hashin > requirements.txt
+	-cat requirements-pinned.txt | grep "py-cid" >> requirements.txt
+	-cat requirements-pinned.txt | grep "py-multihash" >> requirements.txt
 
-test:
-	tox -e sphinx,flake8,py36-unpinned-trial,py36-cli,py36-examples,coverage .
+wheel:
+	LMDB_FORCE_CFFI=1 SODIUM_INSTALL=bundled pip wheel --require-hashes --wheel-dir ./wheels -r requirements.txt
 
-test_bandit:
-	tox -e bandit .
+# test all syntax check target on the host via tox
+test_quick:
+	tox -e  sphinx,flake8,mypy,yapf
 
-test_cli:
-	./test/test_cli.sh
+# test all targets on the host via tox
+test_all:
+	tox -e sphinx,flake8,mypy,yapf,bandit,py311-pinned-trial,py311-unpinned-trial,py311-abtrunk-trial,py311-examples,pytest,functests-cb
+#	tox -e functests-cfc
 
-test_cli_tox:
-	tox -e py36-cli .
+test_automate:
+	tox -e py311-cli-0
+	tox -e py311-cli-1,py311-cli-2,py311-cli-3
+	tox -e py311-api-1
 
-test_examples:
-	tox -e py36-examples .
+# directly test CLI script normally run for "tox -e py311-cli-0"
+test_cli: test_cli0 test_cli1 test_cli2 test_cli3
 
-test_mqtt:
-#	trial crossbar.adapter.mqtt.test.test_wamp
-	trial crossbar.adapter.mqtt.test.test_wamp.MQTTAdapterTests.test_basic_publish
+test_ab_examples:
+	CROSSBAR_FABRIC_SUPERUSER=${PWD}/test/cfc/.crossbar/default.pub \
+		./test/test_ab_examples.sh
 
-test_reactors:
-	clear
-	-crossbar version --loglevel=debug
-	-crossbar --reactor="select" version --loglevel=debug
-	-crossbar --reactor="poll" version --loglevel=debug
-	-crossbar --reactor="epoll" version --loglevel=debug
-	-crossbar --reactor="kqueue" version --loglevel=debug
-	-crossbar --reactor="iocp" version --loglevel=debug
+test_cli0:
+	CROSSBAR_FABRIC_SUPERUSER=${PWD}/test/cfc/.crossbar/default.pub \
+		./test/test_cli_0.sh
 
-full_test: clean flake8
-	trial crossbar
+test_cli1:
+	CROSSBAR_FABRIC_SUPERUSER=${PWD}/test/cfc/.crossbar/default.pub \
+		./test/test_cli_1.sh
 
-# This will run pep8, pyflakes and can skip lines that end with # noqa
-flake8:
-	flake8 --ignore=E402,F405,E501,E722,E741,E731,N801,N802,N803,N805,N806 crossbar
+test_cli2:
+	CROSSBAR_FABRIC_SUPERUSER=${PWD}/test/cfc/.crossbar/default.pub \
+		./test/test_cli_2.sh
 
-flake8_stats:
-	flake8 --statistics --max-line-length=119 -qq crossbar
+test_cli3:
+	CROSSBAR_FABRIC_SUPERUSER=${PWD}/test/cfc/.crossbar/default.pub \
+		./test/test_cli_3.sh
 
-version:
-	PYTHONPATH=. python -m crossbar.controller.cli version
+# test all broken (FIXME) targets
+test_fixme:
+	tox -e	py311-automate-1,py311-automate-2,py311-xbrnetwork-1
 
-pyflakes:
-	pyflakes crossbar
+test_cb_apperrors:
+	pytest -sv --no-install test/functests/cbtests/test_cb_apperrors.py
 
-pep8:
-	pep8 --statistics --ignore=E501 -qq .
+test_cb_proxy:
+	pytest -sv --no-install test/functests/cbtests/test_cb_proxy.py
 
-pep8_show_e231:
-	pep8 --select=E231 --show-source
+test_cb_authorize:
+	pytest -sv crossbar/router/test/test_authorize.py::TestDynamicAuth::test_authextra_wampcryptosign
 
-autopep8:
-	autopep8 -ri --aggressive --ignore=E501 .
+test_cb_cookie:
+	trial crossbar.router.test.test_cookiestore
 
-pylint:
-	pylint -d line-too-long,invalid-name crossbar
+test_wap:
+	trial crossbar.webservice.test
 
-find_classes:
-	find crossbar -name "*.py" -exec grep -Hi "^class" {} \; | grep -iv test
+test_wildcard:
+	trial crossbar.router.test.test_wildcard
+
+docs:
+	cd docs && sphinx-build -b html . _build
+
+docs_check:
+	cd docs && sphinx-build -nWT -b dummy . _build
+
+docs_spelling:
+	cd docs && sphinx-build -nWT -b spelling -d ./_build/doctrees . ./_build/spelling
+
+docs_run: docs
+	twistd --nodaemon web --path=docs/_build --listen=tcp:8090
+
+docs_clean:
+	-rm -rf ./docs/_build
 
 # sudo apt install gource ffmpeg
 gource:
@@ -194,3 +192,12 @@ gource:
 	-threads 0 \
 	-bf 0 \
 	crossbar.mp4
+
+find_uris:
+	python find-uris.py
+
+find_registers:
+	find crossbar -name "*.py" -exec grep -Hi -n2 "@wamp.register" {} \;
+
+fix_copyright:
+	find . -type f -exec sed -i 's/Copyright (c) Crossbar.io Technologies GmbH/Copyright (c) typedef int GmbH/g' {} \;

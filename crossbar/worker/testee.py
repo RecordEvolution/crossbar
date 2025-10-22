@@ -1,34 +1,9 @@
 #####################################################################################
 #
-#  Copyright (c) Crossbar.io Technologies GmbH
-#
-#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
-#  you have purchased a commercial license), the license terms below apply.
-#
-#  Should you enter into a separate license agreement after having received a copy of
-#  this software, then the terms of such license agreement replace the terms below at
-#  the time at which such license agreement becomes effective.
-#
-#  In case a separate license agreement ends, and such agreement ends without being
-#  replaced by another separate license agreement, the license terms below apply
-#  from the time at which said agreement ends.
-#
-#  LICENSE TERMS
-#
-#  This program is free software: you can redistribute it and/or modify it under the
-#  terms of the GNU Affero General Public License, version 3, as published by the
-#  Free Software Foundation. This program is distributed in the hope that it will be
-#  useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
-#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-#
-#  See the GNU Affero General Public License Version 3 for more details.
-#
-#  You should have received a copy of the GNU Affero General Public license along
-#  with this program. If not, see <http://www.gnu.org/licenses/agpl-3.0.en.html>.
+#  Copyright (c) typedef int GmbH
+#  SPDX-License-Identifier: EUPL-1.2
 #
 #####################################################################################
-
-from __future__ import absolute_import
 
 from twisted.internet.defer import inlineCallbacks
 from twisted.internet import protocol
@@ -52,7 +27,6 @@ __all__ = (
 
 
 class StreamTesteeServerProtocol(protocol.Protocol):
-
     def dataReceived(self, data):
         self.transport.write(data)
 
@@ -76,16 +50,16 @@ class WebSocketTesteeServerProtocol(WebSocketServerProtocol):
         """
         try:
             page = self.factory._templates.get_template('cb_ws_testee_status.html')
-            self.sendHtml(page.render(redirectUrl=redirectUrl,
-                                      redirectAfter=redirectAfter,
-                                      cbVersion=crossbar.__version__,
-                                      wsUri=self.factory.url))
+            self.sendHtml(
+                page.render(redirectUrl=redirectUrl,
+                            redirectAfter=redirectAfter,
+                            cbVersion=crossbar.__version__,
+                            wsUri=self.factory.url))
         except Exception as e:
             self.log.warn("Error rendering WebSocket status page template: {e}", e=e)
 
 
 class StreamingWebSocketTesteeServerProtocol(WebSocketServerProtocol):
-
     def onMessageBegin(self, isBinary):
         WebSocketServerProtocol.onMessageBegin(self, isBinary)
         self.beginMessage(isBinary=isBinary)
@@ -122,10 +96,7 @@ class WebSocketTesteeServerFactory(WebSocketServerFactory):
         server = "Crossbar/{}".format(crossbar.__version__)
         externalPort = options.get('external_port', None)
 
-        WebSocketServerFactory.__init__(self,
-                                        url=config.get('url', None),
-                                        server=server,
-                                        externalPort=externalPort)
+        WebSocketServerFactory.__init__(self, url=config.get('url', None), server=server, externalPort=externalPort)
 
         # transport configuration
         self._config = config
@@ -142,7 +113,7 @@ class WebSocketTesteeController(WorkerController):
     A native Crossbar.io worker that runs a WebSocket testee.
     """
     WORKER_TYPE = 'websocket-testee'
-    WORKER_TITLE = u'WebSocket Testee'
+    WORKER_TITLE = 'WebSocket Testee'
 
     def __init__(self, config=None, reactor=None, personality=None):
         # base ctor
@@ -176,7 +147,7 @@ class WebSocketTesteeController(WorkerController):
         # if id in self.transports:
         #     emsg = "Could not start transport: a transport with ID '{}' is already running (or starting)".format(id)
         #     self.log.error(emsg)
-        #     raise ApplicationError(u'crossbar.error.already_running', emsg)
+        #     raise ApplicationError('crossbar.error.already_running', emsg)
 
         # check configuration
         #
@@ -185,7 +156,7 @@ class WebSocketTesteeController(WorkerController):
         except Exception as e:
             emsg = "Invalid WebSocket testee transport configuration: {}".format(e)
             self.log.error(emsg)
-            raise ApplicationError(u"crossbar.error.invalid_configuration", emsg)
+            raise ApplicationError("crossbar.error.invalid_configuration", emsg)
         else:
             self.log.debug("Starting {ttype}-transport on websocket-testee.", ttype=config['type'])
 
@@ -203,11 +174,8 @@ class WebSocketTesteeController(WorkerController):
 
         # create transport endpoint / listening port from transport factory
         #
-        d = create_listening_port_from_config(config['endpoint'],
-                                              self.config.extra.cbdir,
-                                              transport_factory,
-                                              self._reactor,
-                                              self.log)
+        d = create_listening_port_from_config(config['endpoint'], self.config.extra.cbdir, transport_factory,
+                                              self._reactor, self.log)
 
         def ok(port):
             # FIXME
@@ -218,7 +186,7 @@ class WebSocketTesteeController(WorkerController):
         def fail(err):
             emsg = "Cannot listen on transport endpoint: {}".format(err.value)
             self.log.error(emsg)
-            raise ApplicationError(u"crossbar.error.cannot_listen", emsg)
+            raise ApplicationError("crossbar.error.cannot_listen", emsg)
 
         d.addCallbacks(ok, fail)
         return d

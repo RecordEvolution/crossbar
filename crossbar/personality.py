@@ -1,39 +1,16 @@
 #####################################################################################
 #
-#  Copyright (c) Crossbar.io Technologies GmbH
-#
-#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
-#  you have purchased a commercial license), the license terms below apply.
-#
-#  Should you enter into a separate license agreement after having received a copy of
-#  this software, then the terms of such license agreement replace the terms below at
-#  the time at which such license agreement becomes effective.
-#
-#  In case a separate license agreement ends, and such agreement ends without being
-#  replaced by another separate license agreement, the license terms below apply
-#  from the time at which said agreement ends.
-#
-#  LICENSE TERMS
-#
-#  This program is free software: you can redistribute it and/or modify it under the
-#  terms of the GNU Affero General Public License, version 3, as published by the
-#  Free Software Foundation. This program is distributed in the hope that it will be
-#  useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
-#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-#
-#  See the GNU Affero General Public License Version 3 for more details.
-#
-#  You should have received a copy of the GNU Affero General Public license along
-#  with this program. If not, see <http://www.gnu.org/licenses/agpl-3.0.en.html>.
+#  Copyright (c) typedef int GmbH
+#  SPDX-License-Identifier: EUPL-1.2
 #
 #####################################################################################
 
-from __future__ import absolute_import
-
 import time
 from collections.abc import Mapping
+from typing import Dict
 
 import txaio
+
 txaio.use_twisted()
 
 import crossbar
@@ -44,9 +21,20 @@ from crossbar.worker.router import RouterController
 from crossbar.worker import transport
 from crossbar.worker.container import ContainerController
 from crossbar.worker.testee import WebSocketTesteeController
+from crossbar.worker.proxy import ProxyController, ProxyWorkerProcess
 from crossbar.webservice import base
-from crossbar.webservice import wsgi, rest, longpoll, websocket, misc, static
-from crossbar.router.realmstore import MemoryRealmStore
+from crossbar.webservice import wsgi, rest, longpoll, websocket, misc, static, archive, wap, catalog
+from crossbar.interfaces import IRealmStore, IInventory
+from crossbar.router.realmstore import RealmStoreMemory
+from crossbar.router.inventory import Inventory
+
+
+def do_nothing(*args, **kw):
+    return
+
+
+def _check_proxy_config(personality, config):
+    pass
 
 
 def default_native_workers():
@@ -60,11 +48,10 @@ def default_native_workers():
 
         # only check router worker options
         'checkconfig_options': checkconfig.check_router_options,
-
         'logname': 'Router',
         'topics': {
-            'starting': u'crossbar.node.on_router_starting',
-            'started': u'crossbar.node.on_router_started',
+            'starting': 'crossbar.on_router_starting',
+            'started': 'crossbar.on_router_started',
         }
     }
     factory['container'] = {
@@ -76,11 +63,10 @@ def default_native_workers():
 
         # only check container worker options
         'checkconfig_options': checkconfig.check_container_options,
-
         'logname': 'Container',
         'topics': {
-            'starting': u'crossbar.node.on_container_starting',
-            'started': u'crossbar.node.on_container_started',
+            'starting': 'crossbar.on_container_starting',
+            'started': 'crossbar.on_container_started',
         }
     }
     factory['websocket-testee'] = {
@@ -92,30 +78,32 @@ def default_native_workers():
 
         # only check websocket testee worker worker options
         'checkconfig_options': checkconfig.check_websocket_testee_options,
-
         'logname': 'WebSocketTestee',
         'topics': {
-            'starting': u'crossbar.node.on_websocket_testee_starting',
-            'started': u'crossbar.node.on_websocket_testee_started',
+            'starting': 'crossbar.on_websocket_testee_starting',
+            'started': 'crossbar.on_websocket_testee_started',
+        }
+    }
+    factory['proxy'] = {
+        'process_class': ProxyWorkerProcess,
+        'class': ProxyWorkerProcess,
+        'worker_class': ProxyController,
+
+        # FIXME: check a whole proxy worker configuration item (including transports, backends, ..)
+        'checkconfig_item': _check_proxy_config,
+        # FIXME: only check proxy worker options
+        'checkconfig_options': do_nothing,  # checkconfig.check_native_worker_options,
+        'logname': 'Proxy',
+        'topics': {
+            'starting': 'crossbar.on_proxy_starting',
+            'started': 'crossbar.on_proxy_started',
         }
     }
     return factory
 
 
-def create_realm_store(personality, factory, config):
+def create_realm_store(personality, factory, config) -> IRealmStore:
     """
-
-    :param personality: Node personality
-    :type personality: :class:`crossbar.personality
-
-    :param factory: Router factory
-    :type factory: :class:`crossbar.router.router.RouterFactory`
-    :param config:
-    :return:
-    """
-    """
-    store = psn.create_realm_store(psn, self._node_id, self._worker, self, realm.config['store'])
-
     Factory for creating realm stores (which store call queues and event history).
 
     .. code-block:: json
@@ -139,6 +127,12 @@ def create_realm_store(personality, factory, config):
             ]
         }
 
+    :param personality: Node personality
+    :type personality: :class:`crossbar.personality
+
+    :param factory: Router factory
+    :type factory: :class:`crossbar.router.router.RouterFactory`
+
     :param config: Realm store configuration item.
     :type config: dict
     """
@@ -159,19 +153,76 @@ def create_realm_store(personality, factory, config):
     return store
 
 
-_TITLE = "Crossbar"
+def create_realm_inventory(personality, factory, config) -> IInventory:
+    """
 
+    .. code-block:: json
+
+        {
+            "version": 2,
+            "workers": [
+                {
+                    "type": "router",
+                    "realms": [
+                        {
+                            "name": "realm1",
+                            "inventory": {
+                                "type": "wamp.eth",
+                                "catalogs": [
+                                    {
+                                        "name": "pydefi",
+                                        "filename": "../schema/trading.bfbs"
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+
+    :param personality: Node personality
+    :type personality: :class:`crossbar.personality`
+
+    :param factory: Router factory
+    :type factory: :class:`crossbar.router.router.RouterFactory`
+
+    :param config: FbsRepository configuration
+    :type config: dict, for example:
+        .. code-block:: json
+            {
+                "type": "wamp.eth",
+                "catalogs": [
+                    {
+                        "name": "pydefi",
+                        "filename": "../schema/trading.bfbs"
+                    }
+                ]
+            }
+
+    :return: A new realm inventory object.
+    """
+    inventory = Inventory.from_config(personality, factory, config)
+    return inventory
+
+
+_TITLE = "Crossbar.io"
+
+# sudo apt install figlet && figlet -f smslant "Crossbar FX"
 _BANNER = r"""
     :::::::::::::::::
-          :::::          _____                      __
-    :::::   :   :::::   / ___/____ ___   ___  ___  / /  ___ _ ____
-    :::::::   :::::::  / /__ / __// _ \ (_-< (_-< / _ \/ _ `// __/
-    :::::   :   :::::  \___//_/   \___//___//___//_.__/\_,_//_/
+          :::::          _____                 __              _
+    :::::   :   :::::   / ___/______  ___ ___ / /  ___ _____  (_)__
+    :::::::   :::::::  / /__/ __/ _ \(_-<(_-</ _ \/ _ `/ __/ / / _ \
+    :::::   :   :::::  \___/_/  \___/___/___/_.__/\_,_/_/ (_)_/\___/
           :::::
-    :::::::::::::::::   {title} v{version}
+    :::::::::::::::::   {title} v{version} [{build}]
 
-    Copyright (c) 2013-{year} Crossbar.io Technologies GmbH, licensed under AGPL 3.0.
+    Copyright (c) 2013-{year} Crossbar.io Technologies GmbH. Licensed under EUPLv1.2.
 """
+
+_DESC = """Crossbar.io is a decentralized data plane for XBR/WAMP based application
+service and data routing, built on Crossbar.io OSS."""
 
 
 class Personality(object):
@@ -188,75 +239,68 @@ class Personality(object):
 
     TITLE = _TITLE
 
-    DESC = crossbar.__doc__
+    DESC = _DESC
 
-    BANNER = _BANNER.format(title=_TITLE, version=crossbar.__version__, year=time.strftime('%Y'))
+    BANNER = _BANNER.format(title=_TITLE,
+                            version=crossbar.__version__,
+                            build=crossbar.__build__,
+                            year=time.strftime('%Y'))
 
-    LEGAL = ('crossbar', 'LEGAL')
+    LICENSE = ('crossbar', 'LICENSE')
+    LICENSES_OSS = ('crossbar', 'LICENSES-OSS')
 
     # a list of directories to serach Jinja2 templates for
     # rendering various web resources. this must be a list
     # of _pairs_ to be used with pkg_resources.resource_filename()!
     TEMPLATE_DIRS = [('crossbar', 'webservice/templates')]
 
-    WEB_SERVICE_CHECKERS = {
+    WEB_SERVICE_CHECKERS: Dict[str, object] = {
         'none': None,
-
         'path': checkconfig.check_web_path_service_path,
         'redirect': checkconfig.check_web_path_service_redirect,
         'resource': checkconfig.check_web_path_service_resource,
         'reverseproxy': checkconfig.check_web_path_service_reverseproxy,
-
         'nodeinfo': checkconfig.check_web_path_service_nodeinfo,
         'json': checkconfig.check_web_path_service_json,
         'cgi': checkconfig.check_web_path_service_cgi,
-
         'wsgi': checkconfig.check_web_path_service_wsgi,
-
         'static': checkconfig.check_web_path_service_static,
-
         'websocket': checkconfig.check_web_path_service_websocket,
         'websocket-reverseproxy': checkconfig.check_web_path_service_websocket_reverseproxy,
-
         'longpoll': checkconfig.check_web_path_service_longpoll,
-
         'caller': checkconfig.check_web_path_service_caller,
         'publisher': checkconfig.check_web_path_service_publisher,
         'webhook': checkconfig.check_web_path_service_webhook,
+        'archive': archive.RouterWebServiceArchive.check,
+        'wap': wap.RouterWebServiceWap.check,
+        'catalog': catalog.RouterWebServiceCatalog.check,
     }
 
-    WEB_SERVICE_FACTORIES = {
-        # renders to 404
-        'none': base.RouterWebService,
-
+    WEB_SERVICE_FACTORIES: Dict[str, object] = {
+        'none': base.RouterWebService,  # renders to 404
         'path': base.RouterWebServiceNestedPath,
         'redirect': base.RouterWebServiceRedirect,
         'resource': base.RouterWebServiceTwistedWeb,
         'reverseproxy': base.RouterWebServiceReverseWeb,
-
         'nodeinfo': misc.RouterWebServiceNodeInfo,
         'json': misc.RouterWebServiceJson,
         'cgi': misc.RouterWebServiceCgi,
-
         'wsgi': wsgi.RouterWebServiceWsgi,
-
         'static': static.RouterWebServiceStatic,
-
         'websocket': websocket.RouterWebServiceWebSocket,
         'websocket-reverseproxy': websocket.RouterWebServiceWebSocketReverseProxy,
-
         'longpoll': longpoll.RouterWebServiceLongPoll,
-
         'caller': rest.RouterWebServiceRestCaller,
         'publisher': rest.RouterWebServiceRestPublisher,
         'webhook': rest.RouterWebServiceWebhook,
+        'archive': archive.RouterWebServiceArchive,
+        'wap': wap.RouterWebServiceWap,
+        'catalog': catalog.RouterWebServiceCatalog,
     }
 
-    EXTRA_AUTH_METHODS = dict()
+    EXTRA_AUTH_METHODS: Dict[str, object] = {}
 
-    REALM_STORES = {
-        'memory': MemoryRealmStore
-    }
+    REALM_STORES: Dict[str, object] = {'memory': RealmStoreMemory}
 
     Node = node.Node
     NodeOptions = node.NodeOptions
@@ -268,6 +312,8 @@ class Personality(object):
     create_router_transport = transport.create_router_transport
 
     create_realm_store = create_realm_store
+
+    create_realm_inventory = create_realm_inventory
 
     RouterWebTransport = transport.RouterWebTransport
 
@@ -288,6 +334,7 @@ class Personality(object):
     # top level
     check_controller = checkconfig.check_controller
     check_controller_options = checkconfig.check_controller_options
+    check_node_key = checkconfig.check_node_key
     check_worker = checkconfig.check_worker
 
     # native workers

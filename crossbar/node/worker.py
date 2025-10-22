@@ -1,37 +1,11 @@
 #####################################################################################
 #
-#  Copyright (c) Crossbar.io Technologies GmbH
-#
-#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
-#  you have purchased a commercial license), the license terms below apply.
-#
-#  Should you enter into a separate license agreement after having received a copy of
-#  this software, then the terms of such license agreement replace the terms below at
-#  the time at which such license agreement becomes effective.
-#
-#  In case a separate license agreement ends, and such agreement ends without being
-#  replaced by another separate license agreement, the license terms below apply
-#  from the time at which said agreement ends.
-#
-#  LICENSE TERMS
-#
-#  This program is free software: you can redistribute it and/or modify it under the
-#  terms of the GNU Affero General Public License, version 3, as published by the
-#  Free Software Foundation. This program is distributed in the hope that it will be
-#  useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
-#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-#
-#  See the GNU Affero General Public License Version 3 for more details.
-#
-#  You should have received a copy of the GNU Affero General Public license along
-#  with this program. If not, see <http://www.gnu.org/licenses/agpl-3.0.en.html>.
+#  Copyright (c) typedef int GmbH
+#  SPDX-License-Identifier: EUPL-1.2
 #
 #####################################################################################
 
-from __future__ import absolute_import, print_function
-
 import os
-import six
 import json
 
 from collections import deque
@@ -46,9 +20,7 @@ from txaio import make_logger
 from crossbar._logging import cb_logging_aware, escape_formatting, record_separator
 from crossbar.common.processinfo import ProcessInfo
 
-__all__ = ('RouterWorkerProcess',
-           'ContainerWorkerProcess',
-           'GuestWorkerProcess',
+__all__ = ('ControllerWorkerProcess', 'RouterWorkerProcess', 'ContainerWorkerProcess', 'GuestWorkerProcess',
            'WebSocketTesteeWorkerProcess')
 
 
@@ -56,19 +28,21 @@ class WorkerProcess(object):
     """
     Internal run-time representation of a worker process.
     """
-    TYPE = u'worker'
-    LOGNAME = u'Worker'
+    TYPE = 'worker'
+    LOGNAME = 'Worker'
 
-    def __init__(self, controller, id, who, keeplog=None):
+    def __init__(self, controller, id, who=None, keeplog=None):
         """
-        Ctor.
 
         :param controller: The node controller this worker was created by.
         :type controller: instance of NodeController
+
         :param id: The ID of the worker.
         :type id: str
+
         :param who: Who triggered creation of this worker.
-        :type who: str
+        :type who: str or None
+
         :param keeplog: If not `None`, buffer log message received to be later
                         retrieved via getlog(). If `0`, keep infinite log internally.
                         If `> 0`, keep at most such many log entries in buffer.
@@ -81,7 +55,7 @@ class WorkerProcess(object):
         self.id = id
         self.who = who
         self.pid = None
-        self.status = u'starting'
+        self.status = 'starting'
 
         self.created = datetime.utcnow()
         self.connected = None
@@ -97,7 +71,7 @@ class WorkerProcess(object):
         else:
             self._log_fds = [1, 2]
         self._log_lineno = 0
-        self._log_topic = u'crossbar.worker.{}.on_log'.format(self.id)
+        self._log_topic = 'crossbar.worker.{}.on_log'.format(self.id)
 
         self._log_rich = None  # Does not support rich logs
 
@@ -118,12 +92,12 @@ class WorkerProcess(object):
 
         IMPORTANT: this slightly differs between native workers and guest workers!
         """
-        assert(self.status == u'starting')
-        assert(self.connected is None)
-        assert(self.proto is None)
-        assert(self.pid is None)
-        assert(self.pinfo is None)
-        self.status = u'connected'
+        assert (self.status == 'starting')
+        assert (self.connected is None)
+        assert (self.proto is None)
+        assert (self.pid is None)
+        assert (self.pinfo is None)
+        self.status = 'connected'
         self.connected = datetime.utcnow()
         self.proto = proto
         self.pid = proto.transport.pid
@@ -136,19 +110,19 @@ class WorkerProcess(object):
 
         The worker is now ready for use!
         """
-        assert(self.status in [u'starting', u'connected'])
-        assert(self.started is None)
-        assert(self.proto is not None or proto is not None)
+        assert (self.status in ['starting', 'connected'])
+        assert (self.started is None)
+        assert (self.proto is not None or proto is not None)
 
         if not self.pid:
             self.pid = proto.transport.pid
         if not self.pinfo:
             self.pinfo = ProcessInfo(self.pid)
 
-        assert(self.pid is not None)
-        assert(self.pinfo is not None)
+        assert (self.pid is not None)
+        assert (self.pinfo is not None)
 
-        self.status = u'started'
+        self.status = 'started'
         self.proto = self.proto or proto
         self.started = datetime.utcnow()
 
@@ -161,9 +135,8 @@ class WorkerProcess(object):
         If there's anything left in the log buffer, log it out so it's not
         lost.
         """
-        if self._log_rich and self._log_data != u"":
-            self._logger.warn("REMAINING LOG BUFFER AFTER EXIT FOR PID {pid}:",
-                              pid=self.pid)
+        if self._log_rich and self._log_data != "":
+            self._logger.warn("REMAINING LOG BUFFER AFTER EXIT FOR PID {pid}:", pid=self.pid)
 
             for log in self._log_data.split(os.linesep):
                 self._logger.warn(escape_formatting(log))
@@ -174,7 +147,7 @@ class WorkerProcess(object):
         """
         Handle a log message (or a fragment of such) coming in.
         """
-        assert(childFD in self._log_fds)
+        assert (childFD in self._log_fds)
 
         system = "{:<10} {:>6}".format(self.LOGNAME, self.pid)
 
@@ -188,7 +161,7 @@ class WorkerProcess(object):
             self._log_entries.append(repr(data))
             return
 
-        if type(data) != six.text_type:
+        if not isinstance(data, str):
             data = data.decode('utf8')
 
         if self._log_rich is None:
@@ -196,7 +169,7 @@ class WorkerProcess(object):
             # "magic phrase" as its first message.
             if data[0:len(cb_logging_aware)] == cb_logging_aware:
                 self._log_rich = True
-                self._log_data = u""  # Log buffer
+                self._log_data = ""  # Log buffer
                 return
             else:
                 self._log_rich = False
@@ -212,16 +185,14 @@ class WorkerProcess(object):
                 try:
                     event = json.loads(log)
                 except ValueError:
-                    # If invalid JSON is written out, just output the raw text.
-                    # We tried!
-                    event = {"level": u"warn",
-                             "text": u"INVALID JSON: {}".format(escape_formatting(log))}
+                    # If invalid JSON is written out, just output the raw text at level "info". We tried!
+                    # however, this means no colored logging and such goodies!
+                    event = {"level": "info", "text": "{}".format(escape_formatting(log))}
                 event_text = event.pop("text")
                 event_namespace = event.pop("namespace", None)
                 level = event.pop("level")
 
-                self._logger.emit(level, event_text, log_system=system,
-                                  cb_namespace=event_namespace, **event)
+                self._logger.emit(level, event_text, log_system=system, cb_namespace=event_namespace, **event)
                 self._log_entries.append(event)
 
                 if self._log_topic:
@@ -234,7 +205,7 @@ class WorkerProcess(object):
             for row in data.split(os.linesep):
                 row = row.strip()
 
-                if row == u"":
+                if row == "":
                     continue
 
                 self._logger.info(row, log_system=system)
@@ -249,10 +220,7 @@ class WorkerProcess(object):
         over one of the pipes used for communicating with the worker.
         """
         if fd not in self._stats:
-            self._stats[fd] = {
-                'count': 0,
-                'bytes': 0
-            }
+            self._stats[fd] = {'count': 0, 'bytes': 0}
         self._stats[fd]['count'] += 1
         self._stats[fd]['bytes'] += dlen
 
@@ -267,6 +235,7 @@ class WorkerProcess(object):
 
             def print_stats():
                 self._logger.info("Worker {id} -> Controller traffic: {stats}", id=self.id, stats=self._stats)
+
             self._stats_printer = LoopingCall(print_stats)
             self._stats_printer.start(period)
 
@@ -280,17 +249,18 @@ class NativeWorkerProcess(WorkerProcess):
     container currently) process.
     """
 
-    TYPE = u'native'
-    LOGNAME = u'Native'
+    TYPE = 'native'
+    LOGNAME = 'Native'
 
-    def __init__(self, controller, id, who, keeplog=None):
+    def __init__(self, controller, id, who=None, keeplog=None):
         """
-        Ctor.
 
         :param controller: The node controller this worker was created by.
         :type controller: instance of NodeController
+
         :param id: The ID of the worker.
         :type id: str
+
         :param who: Who triggered creation of this worker.
         :type who: str
         """
@@ -300,13 +270,22 @@ class NativeWorkerProcess(WorkerProcess):
         self.proto = None
 
 
+class ControllerWorkerProcess(NativeWorkerProcess):
+    """
+    Internal run-time representation of a controller process.
+    """
+
+    TYPE = 'controller'
+    LOGNAME = 'Controller'
+
+
 class RouterWorkerProcess(NativeWorkerProcess):
     """
     Internal run-time representation of a router worker process.
     """
 
-    TYPE = u'router'
-    LOGNAME = u'Router'
+    TYPE = 'router'
+    LOGNAME = 'Router'
 
 
 class ContainerWorkerProcess(NativeWorkerProcess):
@@ -314,8 +293,8 @@ class ContainerWorkerProcess(NativeWorkerProcess):
     Internal run-time representation of a container worker process.
     """
 
-    TYPE = u'container'
-    LOGNAME = u'Container'
+    TYPE = 'container'
+    LOGNAME = 'Container'
 
 
 class WebSocketTesteeWorkerProcess(NativeWorkerProcess):
@@ -323,8 +302,8 @@ class WebSocketTesteeWorkerProcess(NativeWorkerProcess):
     Internal run-time representation of a websocket-testee worker process.
     """
 
-    TYPE = u'websocket-testee'
-    LOGNAME = u'WebSocketTestee'
+    TYPE = 'websocket-testee'
+    LOGNAME = 'WebSocketTestee'
 
 
 class GuestWorkerProcess(WorkerProcess):
@@ -332,17 +311,18 @@ class GuestWorkerProcess(WorkerProcess):
     Internal run-time representation of a guest worker process.
     """
 
-    TYPE = u'guest'
-    LOGNAME = u'Guest'
+    TYPE = 'guest'
+    LOGNAME = 'Guest'
 
     def __init__(self, controller, id, who, keeplog=None):
         """
-        Ctor.
 
         :param controller: The node controller this worker was created by.
         :type controller: instance of NodeController
+
         :param id: The ID of the worker.
         :type id: str
+
         :param who: Who triggered creation of this worker.
         :type who: str
         """
