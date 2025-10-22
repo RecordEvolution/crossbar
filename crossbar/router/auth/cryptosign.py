@@ -105,7 +105,7 @@ class PendingAuthCryptosign(PendingAuth):
             'challenge': binascii.b2a_hex(self._challenge).decode(),
             'channel_binding': requested_channel_binding,
         }
-        self.log.info(
+        self.log.debug(
             '{func}::_compute_challenge(channel_binding={channel_binding})[channel_id={channel_id}] -> extra=\n{extra}',
             func=hltype(self.hello),
             channel_id=hlid('0x' + binascii.b2a_hex(self._channel_id).decode()) if self._channel_id else None,
@@ -115,7 +115,7 @@ class PendingAuthCryptosign(PendingAuth):
         return extra
 
     def hello(self, realm: str, details: HelloDetails) -> Union[Accept, Deny, Challenge]:
-        self.log.info(
+        self.log.debug(
             '{func}::hello(realm="{realm}", details.authid="{authid}", details.authrole="{authrole}", '
             'details.authextra="{authextra}")',
             func=hltype(self.hello),
@@ -129,7 +129,7 @@ class PendingAuthCryptosign(PendingAuth):
         if requested_channel_binding is not None and requested_channel_binding not in ['tls-unique']:
             return Deny(message='invalid channel binding type "{}" requested'.format(requested_channel_binding))
         else:
-            self.log.info(
+            self.log.debug(
                 "WAMP-cryptosign CHANNEL BINDING requested: channel_binding={channel_binding}, channel_id={channel_id}",
                 channel_binding=requested_channel_binding,
                 channel_id=self._channel_id)
@@ -146,10 +146,10 @@ class PendingAuthCryptosign(PendingAuth):
             client_trustroot_name_category = identify_realm_name_category(client_trustroot)
             if client_trustroot_name_category not in ['eth', 'ens', 'reverse_ens']:
                 return Deny(message='invalid client trustroot "{}" provided'.format(client_trustroot))
-            self.log.info('{func} using client trustroot {trustroot_name_category} "{trustroot}" from client HELLO',
-                          trustroot=hlid(client_trustroot),
-                          trustroot_name_category=hlval(client_trustroot_name_category, color='green'),
-                          func=hltype(self.hello))
+            self.log.debug('{func} using client trustroot {trustroot_name_category} "{trustroot}" from client HELLO',
+                           trustroot=hlid(client_trustroot),
+                           trustroot_name_category=hlval(client_trustroot_name_category, color='green'),
+                           func=hltype(self.hello))
 
         # get certificates presented by the client
         client_certificates = details.authextra.get('certificates', None) if details.authextra else None
@@ -162,10 +162,10 @@ class PendingAuthCryptosign(PendingAuth):
                     return Deny(
                         message='invalid type {} for certificate {} in client certificates'.format(type(cc), cc_i))
             client_certificates = parse_certificate_chain(client_certificates)
-            self.log.info('{func} using {cnt_cc} client certificates from client HELLO:\n{client_certificates}',
-                          cnt_cc=hlval(len(client_certificates), color='green'),
-                          client_certificates=client_certificates,
-                          func=hltype(self.hello))
+            self.log.debug('{func} using {cnt_cc} client certificates from client HELLO:\n{client_certificates}',
+                           cnt_cc=hlval(len(client_certificates), color='green'),
+                           client_certificates=client_certificates,
+                           func=hltype(self.hello))
 
         if self._config['type'] == 'static':
 
