@@ -1109,12 +1109,6 @@ class RouterController(TransportController):
         :returns: Dict with update status and principal count.
         :rtype: dict
         """
-        self.log.info(
-            '{method} Hot-updating principals for transport "{transport_id}" with {count} principals',
-            transport_id=hlid(transport_id),
-            count=hlval(len(principals), color='green'),
-            method=hltype(self.update_router_transport_principals))
-
         if transport_id not in self.transports:
             emsg = 'Cannot update transport principals: no transport with ID "{}"'.format(transport_id)
             self.log.error(emsg)
@@ -1139,21 +1133,11 @@ class RouterController(TransportController):
         # Update the principals in the transport factory's auth config
         # This config is what gets passed to PendingAuthCryptosign instances
         if 'auth' not in factory._config:
-            self.log.warn(
-                '{method} Transport "{transport_id}" has no auth configuration in factory._config. Factory config keys: {config_keys}',
-                transport_id=hlid(transport_id),
-                config_keys=list(factory._config.keys()) if isinstance(factory._config, dict) else type(factory._config),
-                method=hltype(self.update_router_transport_principals))
             emsg = 'Transport "{}" has no auth configuration'.format(transport_id)
+            self.log.error(emsg)
             raise ApplicationError('crossbar.error.invalid_configuration', emsg)
             
         auth_config = factory._config['auth']
-        
-        self.log.info(
-            '{method} Transport "{transport_id}" auth config has methods: {auth_methods}',
-            transport_id=hlid(transport_id),
-            auth_methods=list(auth_config.keys()) if isinstance(auth_config, dict) else type(auth_config),
-            method=hltype(self.update_router_transport_principals))
         
         updated_count = 0
         updated_methods = []
@@ -1161,22 +1145,15 @@ class RouterController(TransportController):
         # Update principals for all cryptosign-* auth methods
         for authmethod in ['cryptosign-proxy']:
             if authmethod in auth_config:
-                old_principals = auth_config[authmethod].get('principals', {})
-                self.log.info(
-                    '{method} Updating "{authmethod}" - before: {old_authids}, after: {new_authids}',
-                    authmethod=hlid(authmethod),
-                    old_authids=list(old_principals.keys()) if isinstance(old_principals, dict) else 'N/A',
-                    new_authids=list(principals.keys()),
-                    method=hltype(self.update_router_transport_principals))
-                
                 auth_config[authmethod]['principals'] = principals
                 updated_count += 1
                 updated_methods.append(authmethod)
                 
                 self.log.info(
-                    '{method} Updated auth method "{authmethod}" in transport "{transport_id}" with principals: {principal_authids}',
+                    '{method} Updated auth method "{authmethod}" in transport "{transport_id}" with {count} principals: {principal_authids}',
                     authmethod=hlid(authmethod),
                     transport_id=hlid(transport_id),
+                    count=len(principals),
                     principal_authids=hlval(list(principals.keys()), color='green'),
                     method=hltype(self.update_router_transport_principals))
 

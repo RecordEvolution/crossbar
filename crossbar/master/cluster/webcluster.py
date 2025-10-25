@@ -204,6 +204,7 @@ class WebClusterMonitor(object):
                                     worker_options)
                                 worker = yield self._manager._session.call(
                                     'crossbarfabriccenter.remote.node.get_worker', node_oid, worker_id)
+                                
                                 self.log.info(
                                     '{func} Web cluster worker {worker_id} started on node {node_oid} [{worker_started}]',
                                     func=hltype(self._check_and_apply),
@@ -409,8 +410,7 @@ class WebClusterMonitor(object):
                                             arealm_oid=hlid(arealm_oid),
                                             workergroup_oid=hlid(arealm.workergroup_oid))
 
-                        wk = (node_oid, worker['id'])
-                        workers[wk] = worker
+                        workers[(node_oid, worker['id'])] = worker
                 else:
                     self.log.warn('{func} Web cluster node {node_oid} not running [status={status}]',
                                   func=hltype(self._check_and_apply),
@@ -437,19 +437,6 @@ class WebClusterMonitor(object):
             self.log.failure()
 
         self._workers = workers
-        for node_oid, worker_id in self._workers:
-            worker = self._workers[(node_oid, worker_id)]
-            if worker:
-                status = worker['status'].upper()
-            else:
-                status = 'MISSING'
-            self.log.info(
-                '{func} webcluster {webcluster_oid} worker {worker_id} on node {node_oid} has status {status}',
-                func=hltype(self._check_and_apply),
-                worker_id=hlid(worker_id),
-                node_oid=hlid(node_oid),
-                webcluster_oid=hlid(self._webcluster_oid),
-                status=hlval(status))
 
         if is_running_completely:
             color = 'green'

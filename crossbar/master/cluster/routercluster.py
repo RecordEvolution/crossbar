@@ -522,14 +522,6 @@ class RouterClusterMonitor(object):
                     desired_principals.update(rlink_principals)
                     desired_principals.update(proxy_principals)
 
-                    self.log.info(
-                        '{func} Preparing hot-reload for transport {transport_id}: rlinks={rlink_authids}, proxies={proxy_authids}, total={total_authids}',
-                        func=hltype(self._update_workergroup_transports),
-                        transport_id=hlid(transport_id),
-                        rlink_authids=list(rlink_principals.keys()),
-                        proxy_authids=list(proxy_principals.keys()),
-                        total_authids=list(desired_principals.keys()))
-
                     # Hot-reload principals without restarting transport
                     # This avoids dropping connections and changing the port
                     # With hot-reload, we can just push the desired state directly
@@ -542,24 +534,15 @@ class RouterClusterMonitor(object):
                         continue
                     
                     try:
-                        self.log.info(
-                            '{func} Calling update_router_transport_principals for {transport_id} with {count} principals',
-                            func=hltype(self._update_workergroup_transports),
-                            transport_id=hlid(transport_id),
-                            count=len(desired_principals))
-                        
-                        result = yield self._manager._session.call(
+                        yield self._manager._session.call(
                             'crossbarfabriccenter.remote.router.update_router_transport_principals',
                             str(node_oid), worker_name, transport_id, desired_principals)
 
                         self.log.info(
-                            '{func} Successfully hot-updated transport {transport_id} principals on worker {worker_name}: '
-                            'methods={auth_methods}, count={count}',
+                            '{func} Successfully hot-updated transport {transport_id} principals: {principal_authids}',
                             func=hltype(self._update_workergroup_transports),
                             transport_id=hlid(transport_id),
-                            worker_name=hlid(worker_name),
-                            auth_methods=result.get('auth_methods_updated', result.get('authenticators_updated', [])),
-                            count=hlval(result.get('principal_count', 0), color='green'))
+                            principal_authids=list(desired_principals.keys()))
                     except Exception as e:
                         self.log.error(
                             '{func} Failed to hot-update transport {transport_id} principals: {error}',

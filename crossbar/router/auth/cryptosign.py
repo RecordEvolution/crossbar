@@ -291,13 +291,6 @@ class PendingAuthCryptosign(PendingAuth):
                 with self._principals_lock:
                     principals = self._config.get('principals', {})
                     
-                    self.log.info(
-                        '{func} Looking up authid "{authid}" in principals database with {count} entries: {available_authids}',
-                        func=hltype(self.hello),
-                        authid=hlid(self._authid),
-                        count=len(principals),
-                        available_authids=list(principals.keys()))
-                    
                     if self._authid in principals:
                         principal = principals[self._authid]
                         if pubkey and (pubkey not in principal['authorized_keys']):
