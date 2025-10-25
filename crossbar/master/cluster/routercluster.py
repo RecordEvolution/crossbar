@@ -457,6 +457,12 @@ class RouterClusterMonitor(object):
                                   func=hltype(self._update_workergroup_transports),
                                   node_oid=wc_node_oid)
 
+            self.log.info(
+                '{func} Built proxy_principals for workergroup {wg_name}: {principals}',
+                func=hltype(self._update_workergroup_transports),
+                wg_name=hlid(workergroup.name),
+                principals=list(proxy_principals.keys()))
+
             # Update transport on each placement
             for placement in placements:
                 node_oid = placement.node_oid
@@ -511,126 +517,56 @@ class RouterClusterMonitor(object):
                         is_success = False
                         continue
 
-                    # Get current principals
-                    transport_config = transport.get('config', {})
-                    current_auth = transport_config.get('auth', {})
-                    cryptosign_config = current_auth.get('cryptosign-proxy', {})
-                    current_principals = cryptosign_config.get('principals', {})
-
                     # Build combined desired principals (rlinks + proxy)
                     desired_principals = {}
                     desired_principals.update(rlink_principals)
                     desired_principals.update(proxy_principals)
 
-                    # Normalize for comparison
-                    def normalize_principals(principals_dict):
-                        """Normalize principals for comparison by sorting authorized_keys lists and removing None values."""
-                        normalized = {}
-                        for authid, principal in principals_dict.items():
-                            normalized_principal = {}
-                            if 'realm' in principal and principal['realm'] is not None:
-                                normalized_principal['realm'] = principal['realm']
-                            if 'role' in principal and principal['role'] is not None:
-                                normalized_principal['role'] = principal['role']
-                            normalized_principal['authorized_keys'] = sorted(principal.get('authorized_keys', []))
-                            normalized[authid] = normalized_principal
-                        return normalized
+                    self.log.info(
+                        '{func} Preparing hot-reload for transport {transport_id}: rlinks={rlink_authids}, proxies={proxy_authids}, total={total_authids}',
+                        func=hltype(self._update_workergroup_transports),
+                        transport_id=hlid(transport_id),
+                        rlink_authids=list(rlink_principals.keys()),
+                        proxy_authids=list(proxy_principals.keys()),
+                        total_authids=list(desired_principals.keys()))
 
-                    current_normalized = normalize_principals(current_principals)
-                    desired_normalized = normalize_principals(desired_principals)
-
-                    # Check if desired principals are a subset of current principals
-                    # We only restart transport if we need to ADD principals, not remove them
-                    # Removed principals (from offline nodes) are harmless and avoid unnecessary restarts
-                    new_authids = set(desired_principals.keys()) - set(current_principals.keys())
-                    removed_authids = set(current_principals.keys()) - set(desired_principals.keys())
-                    modified_authids = set()
-                    for authid in set(current_principals.keys()) & set(desired_principals.keys()):
-                        if current_normalized[authid] != desired_normalized[authid]:
-                            modified_authids.add(authid)
-                            # Log the exact difference
-                            self.log.warn(
-                                '{func} Principal {authid} differs:\n  Current: {current}\n  Desired: {desired}',
-                                func=hltype(self._update_workergroup_transports),
-                                authid=hlid(authid),
-                                current=current_normalized[authid],
-                                desired=desired_normalized[authid])
-
-                    # Only restart if we need to add new principals or modify existing ones
-                    # Ignore removed principals to avoid unnecessary transport restarts
-                    needs_update = len(new_authids) > 0 or len(modified_authids) > 0
-
-                    if removed_authids:
+                    # Hot-reload principals without restarting transport
+                    # This avoids dropping connections and changing the port
+                    # With hot-reload, we can just push the desired state directly
+                    # Note: We call this every iteration to ensure eventual consistency
+                    if not desired_principals:
+                        self.log.warn(
+                            '{func} No principals to update for transport {transport_id} - skipping',
+                            func=hltype(self._update_workergroup_transports),
+                            transport_id=hlid(transport_id))
+                        continue
+                    
+                    try:
                         self.log.info(
-                            '{func} Transport {transport_id} has {count} stale principal(s) (from offline nodes): {authids} - keeping them to avoid transport restart',
+                            '{func} Calling update_router_transport_principals for {transport_id} with {count} principals',
                             func=hltype(self._update_workergroup_transports),
                             transport_id=hlid(transport_id),
-                            count=len(removed_authids),
-                            authids=sorted(removed_authids))
+                            count=len(desired_principals))
+                        
+                        result = yield self._manager._session.call(
+                            'crossbarfabriccenter.remote.router.update_router_transport_principals',
+                            str(node_oid), worker_name, transport_id, desired_principals)
 
-                    if needs_update:
                         self.log.info(
-                            '{func} Updating transport {transport_id} principals on worker {worker_name} for workergroup {wg_name}: '
-                            'current={current_count}, desired={desired_count}, '
-                            'adding={new_count}, removing={removed_count} (ignored), modifying={modified_count}',
+                            '{func} Successfully hot-updated transport {transport_id} principals on worker {worker_name}: '
+                            'methods={auth_methods}, count={count}',
                             func=hltype(self._update_workergroup_transports),
                             transport_id=hlid(transport_id),
                             worker_name=hlid(worker_name),
-                            wg_name=hlval(workergroup.name),
-                            current_count=len(current_principals),
-                            desired_count=len(desired_principals),
-                            new_count=len(new_authids),
-                            removed_count=len(removed_authids),
-                            modified_count=len(modified_authids))
-
-                        # Merge current and desired principals (keep existing + add new/modified)
-                        # This preserves stale principals from offline nodes to avoid unnecessary restarts
-                        updated_principals = dict(current_principals)
-                        for authid in new_authids | modified_authids:
-                            updated_principals[authid] = desired_principals[authid]
-
-                        # Update transport configuration
-                        updated_config = dict(transport.get('config', {}))
-                        if 'auth' not in updated_config:
-                            updated_config['auth'] = {}
-                        if 'cryptosign-proxy' not in updated_config['auth']:
-                            updated_config['auth']['cryptosign-proxy'] = {
-                                'type': 'static',
-                                'default-role': 'proxy'  # Placeholder - replaced by proxy_authrole from authextra
-                            }
-
-                        updated_config['auth']['cryptosign-proxy']['principals'] = updated_principals
-
-                        # Restart transport with updated config
-                        try:
-                            # Stop transport
-                            yield self._manager._session.call(
-                                'crossbarfabriccenter.remote.router.stop_router_transport', str(node_oid), worker_name,
-                                transport_id)
-
-                            # Start transport with updated config
-                            yield self._manager._session.call(
-                                'crossbarfabriccenter.remote.router.start_router_transport', str(node_oid),
-                                worker_name, transport_id, updated_config)
-
-                            self.log.info(
-                                '{func} Successfully updated transport {transport_id} principals on worker {worker_name}',
-                                func=hltype(self._update_workergroup_transports),
-                                transport_id=hlid(transport_id),
-                                worker_name=hlid(worker_name))
-                        except Exception as e:
-                            self.log.error(
-                                '{func} Failed to restart transport {transport_id} with updated principals: {error}',
-                                func=hltype(self._update_workergroup_transports),
-                                transport_id=hlid(transport_id),
-                                error=str(e))
-                            is_success = False
-                    else:
-                        self.log.debug(
-                            '{func} Transport {transport_id} principals already up-to-date ({count} principals)',
+                            auth_methods=result.get('auth_methods_updated', result.get('authenticators_updated', [])),
+                            count=hlval(result.get('principal_count', 0), color='green'))
+                    except Exception as e:
+                        self.log.error(
+                            '{func} Failed to hot-update transport {transport_id} principals: {error}',
                             func=hltype(self._update_workergroup_transports),
                             transport_id=hlid(transport_id),
-                            count=len(current_principals))
+                            error=str(e))
+                        is_success = False
 
                 except ApplicationError as e:
                     if e.error == 'crossbar.error.no_such_object':

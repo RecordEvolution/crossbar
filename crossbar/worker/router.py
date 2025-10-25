@@ -1091,6 +1091,122 @@ class RouterController(TransportController):
         return d
 
     @wamp.register(None)
+    def update_router_transport_principals(self, transport_id, principals, details=None):
+        """
+        Hot-update principals for a running transport without restart.
+        This allows adding/removing/modifying authenticated nodes without
+        dropping existing connections or changing the listening port.
+
+        :param transport_id: The ID of the transport to update.
+        :type transport_id: str
+
+        :param principals: New principals dictionary (authid -> principal config).
+        :type principals: dict
+
+        :param details: Call details.
+        :type details: :class:`autobahn.wamp.types.CallDetails`
+
+        :returns: Dict with update status and principal count.
+        :rtype: dict
+        """
+        self.log.info(
+            '{method} Hot-updating principals for transport "{transport_id}" with {count} principals',
+            transport_id=hlid(transport_id),
+            count=hlval(len(principals), color='green'),
+            method=hltype(self.update_router_transport_principals))
+
+        if transport_id not in self.transports:
+            emsg = 'Cannot update transport principals: no transport with ID "{}"'.format(transport_id)
+            self.log.error(emsg)
+            raise ApplicationError('crossbar.error.no_such_object', emsg)
+
+        router_transport = self.transports[transport_id]
+
+        # Get the transport factory
+        factory = router_transport._transport_factory
+        
+        if not factory:
+            emsg = 'Transport "{}" has no factory (not started?)'.format(transport_id)
+            self.log.error(emsg)
+            raise ApplicationError('crossbar.error.not_started', emsg)
+
+        # Check if factory has _config attribute
+        if not hasattr(factory, '_config'):
+            emsg = 'Transport factory has no _config attribute'
+            self.log.error(emsg)
+            raise ApplicationError('crossbar.error.invalid_configuration', emsg)
+
+        # Update the principals in the transport factory's auth config
+        # This config is what gets passed to PendingAuthCryptosign instances
+        if 'auth' not in factory._config:
+            self.log.warn(
+                '{method} Transport "{transport_id}" has no auth configuration in factory._config. Factory config keys: {config_keys}',
+                transport_id=hlid(transport_id),
+                config_keys=list(factory._config.keys()) if isinstance(factory._config, dict) else type(factory._config),
+                method=hltype(self.update_router_transport_principals))
+            emsg = 'Transport "{}" has no auth configuration'.format(transport_id)
+            raise ApplicationError('crossbar.error.invalid_configuration', emsg)
+            
+        auth_config = factory._config['auth']
+        
+        self.log.info(
+            '{method} Transport "{transport_id}" auth config has methods: {auth_methods}',
+            transport_id=hlid(transport_id),
+            auth_methods=list(auth_config.keys()) if isinstance(auth_config, dict) else type(auth_config),
+            method=hltype(self.update_router_transport_principals))
+        
+        updated_count = 0
+        updated_methods = []
+        
+        # Update principals for all cryptosign-* auth methods
+        for authmethod in ['cryptosign-proxy']:
+            if authmethod in auth_config:
+                old_principals = auth_config[authmethod].get('principals', {})
+                self.log.info(
+                    '{method} Updating "{authmethod}" - before: {old_authids}, after: {new_authids}',
+                    authmethod=hlid(authmethod),
+                    old_authids=list(old_principals.keys()) if isinstance(old_principals, dict) else 'N/A',
+                    new_authids=list(principals.keys()),
+                    method=hltype(self.update_router_transport_principals))
+                
+                auth_config[authmethod]['principals'] = principals
+                updated_count += 1
+                updated_methods.append(authmethod)
+                
+                self.log.info(
+                    '{method} Updated auth method "{authmethod}" in transport "{transport_id}" with principals: {principal_authids}',
+                    authmethod=hlid(authmethod),
+                    transport_id=hlid(transport_id),
+                    principal_authids=hlval(list(principals.keys()), color='green'),
+                    method=hltype(self.update_router_transport_principals))
+
+        if updated_count == 0:
+            self.log.warn(
+                '{method} No cryptosign auth methods found in transport "{transport_id}" configuration',
+                transport_id=hlid(transport_id),
+                method=hltype(self.update_router_transport_principals))
+
+        result = {
+            'transport_id': transport_id,
+            'updated': updated_count > 0,
+            'auth_methods_updated': updated_methods,
+            'principal_count': len(principals)
+        }
+
+        # Publish event
+        caller = details.caller if details else None
+        event = {'id': transport_id, 'principals': list(principals.keys()), 'count': len(principals)}
+        topic = '{}.on_router_transport_principals_updated'.format(self._uri_prefix)
+        self.publish(topic, event, options=PublishOptions(exclude=caller))
+
+        self.log.info(
+            '{method} Successfully hot-updated principals for transport "{transport_id}"',
+            transport_id=hlid(transport_id),
+            method=hltype(self.update_router_transport_principals))
+
+        return result
+
+    @wamp.register(None)
     def kill_by_authid(self, realm_id, authid, reason, message=None, details=None):
         self.log.info('Killing sessions by authid="{authid}" ..',
                       realm_id=hlid(realm_id),

@@ -7,6 +7,7 @@
 
 import os
 import binascii
+import threading
 from pprint import pformat
 from typing import Optional, Union, Dict, Any
 
@@ -63,19 +64,22 @@ class PendingAuthCryptosign(PendingAuth):
         self._challenge: Optional[bytes] = None
         self._expected_signed_message: Optional[bytes] = None
 
+        # Thread-safe lock for principal updates
+        self._principals_lock = threading.RLock()
+
         # map `pubkey -> authid` from `config['principals']`, this is to allow clients to
         # authenticate without specifying an authid
         self._pubkey_to_authid = None
+
+        # cached principals for hot-reload access
+        self._principals = None
 
         # map `realm_name -> trustroot` from `config['trustroots']`
         self._realms_to_trustroots = None
 
         if self._config['type'] == 'static':
             if 'principals' in self._config:
-                self._pubkey_to_authid = {}
-                for authid, principal in self._config.get('principals', {}).items():
-                    for pubkey in principal['authorized_keys']:
-                        self._pubkey_to_authid[pubkey] = authid
+                self._load_principals(self._config.get('principals', {}))
                 self.log.info('{func} using principals ({pubkeys_cnt} pubkeys loaded)',
                               pubkeys_cnt=hlval(len(self._pubkey_to_authid), color='green'),
                               func=hltype(PendingAuthCryptosign.__init__))
@@ -93,6 +97,57 @@ class PendingAuthCryptosign(PendingAuth):
                         assert False, 'invalid realm name "{}" in static cryptosign configuration'.format(_realm)
             else:
                 assert False, 'neither "principals" nor "trustroots" attribute found in static cryptosign configuration'
+
+    def _load_principals(self, principals: Dict[str, Any]):
+        """
+        Load principals into cached lookup structures.
+        Thread-safe method for initial load and hot-reload.
+        
+        :param principals: Dictionary of authid -> principal configuration
+        """
+        with self._principals_lock:
+            self._pubkey_to_authid = {}
+            for authid, principal in principals.items():
+                for pubkey in principal['authorized_keys']:
+                    self._pubkey_to_authid[pubkey] = authid
+            # Store principals for later access
+            self._principals = principals
+
+    def update_principals(self, new_principals: Dict[str, Any]):
+        """
+        Hot-reload principals without restarting the transport.
+        This is called via WAMP management API to update authentication
+        configuration without dropping existing connections.
+        
+        :param new_principals: New dictionary of authid -> principal configuration
+        """
+        # Basic validation
+        if not isinstance(new_principals, dict):
+            raise ValueError('new_principals must be a dictionary')
+        
+        for authid, principal in new_principals.items():
+            if not isinstance(principal, dict):
+                raise ValueError('principal for authid "{}" must be a dictionary'.format(authid))
+            if 'authorized_keys' not in principal:
+                raise ValueError('principal for authid "{}" missing required field "authorized_keys"'.format(authid))
+            if not isinstance(principal['authorized_keys'], list):
+                raise ValueError('authorized_keys for authid "{}" must be a list'.format(authid))
+        
+        self.log.info(
+            '{func} Hot-reloading principals: {count} authids',
+            func=hltype(self.update_principals),
+            count=hlval(len(new_principals), color='green'))
+        
+        # Update config
+        self._config['principals'] = new_principals
+        
+        # Reload principal lookup structures
+        self._load_principals(new_principals)
+        
+        self.log.info(
+            '{func} Successfully reloaded {pubkeys_cnt} pubkeys',
+            func=hltype(self.update_principals),
+            pubkeys_cnt=hlval(len(self._pubkey_to_authid), color='green'))
 
     def _compute_challenge(self, requested_channel_binding: Optional[str]) -> Dict[str, Any]:
         self._challenge = os.urandom(32)
@@ -213,45 +268,56 @@ class PendingAuthCryptosign(PendingAuth):
                 # there is a 1:1 relation between authids and pubkeys !! see below (*)
                 if self._authid is None:
                     if pubkey:
-                        # we do a naive search, but that is ok, since "static mode" is from
-                        # node configuration, and won't contain a lot principals anyway
-                        for _authid, _principal in self._config.get('principals', {}).items():
-                            if pubkey in _principal['authorized_keys']:
-                                # (*): this is necessary to detect multiple authid's having the same pubkey
-                                # in which case we couldn't reliably map the authid from the pubkey
-                                if self._authid is None:
-                                    self._authid = _authid
-                                else:
-                                    return Deny(message='cannot infer client identity from pubkey: multiple authids '
-                                                'in principal database have this pubkey')
+                        # Thread-safe access to principal database
+                        with self._principals_lock:
+                            # we do a naive search, but that is ok, since "static mode" is from
+                            # node configuration, and won't contain a lot principals anyway
+                            for _authid, _principal in self._config.get('principals', {}).items():
+                                if pubkey in _principal['authorized_keys']:
+                                    # (*): this is necessary to detect multiple authid's having the same pubkey
+                                    # in which case we couldn't reliably map the authid from the pubkey
+                                    if self._authid is None:
+                                        self._authid = _authid
+                                    else:
+                                        return Deny(message='cannot infer client identity from pubkey: multiple authids '
+                                                    'in principal database have this pubkey')
                         if self._authid is None:
                             return Deny(message='cannot identify client: no authid requested and no principal found '
                                         'for provided extra.pubkey')
                     else:
                         return Deny(message='cannot identify client: no authid requested and no extra.pubkey provided')
 
-                principals = self._config.get('principals', {})
-                if self._authid in principals:
-                    principal = principals[self._authid]
-                    if pubkey and (pubkey not in principal['authorized_keys']):
-                        self.log.warn(
-                            'extra.pubkey {pubkey} provided does not match any one of authorized_keys for the principal [func="{func}"]:\n{principals}',
-                            func=hltype(self.hello),
-                            realm=hlid(realm),
-                            authid=hlid(details.authid),
-                            pubkey=hlval(pubkey),
-                            principals=pformat(principals))
-                        return Deny(
-                            message='extra.pubkey provided does not match any one of authorized_keys for the principal'
-                        )
-                else:
-                    self.log.warn(
-                        'no principal with authid "{authid}" exists in principals for realm "{realm}" [func="{func}"]:\n{principals}',
+                # Thread-safe access to principals
+                with self._principals_lock:
+                    principals = self._config.get('principals', {})
+                    
+                    self.log.info(
+                        '{func} Looking up authid "{authid}" in principals database with {count} entries: {available_authids}',
                         func=hltype(self.hello),
-                        realm=hlid(realm),
                         authid=hlid(self._authid),
-                        principals=pformat(principals))
-                    return Deny(message='no principal with authid "{}" exists'.format(self._authid))
+                        count=len(principals),
+                        available_authids=list(principals.keys()))
+                    
+                    if self._authid in principals:
+                        principal = principals[self._authid]
+                        if pubkey and (pubkey not in principal['authorized_keys']):
+                            self.log.warn(
+                                'extra.pubkey {pubkey} provided does not match any one of authorized_keys for the principal [func="{func}"]:\n{principals}',
+                                func=hltype(self.hello),
+                                realm=hlid(realm),
+                                authid=hlid(details.authid),
+                                pubkey=hlval(pubkey),
+                                principals=pformat(principals))
+                            return Deny(
+                                message='extra.pubkey provided does not match any one of authorized_keys for the principal'
+                            )
+                    else:
+                        self.log.warn(
+                            'no principal with authid "{authid}" found in principals database [func="{func}"]:\nAvailable principals: {principal_authids}',
+                            func=hltype(self.hello),
+                            authid=hlid(self._authid),
+                            principal_authids=hlval(list(principals.keys()), color='yellow'))
+                        return Deny(message='no principal with authid "{}" exists'.format(self._authid))
 
             # neither "principals" nor "trustroots" configured
             else:
