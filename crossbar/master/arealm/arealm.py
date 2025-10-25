@@ -69,9 +69,6 @@ class ApplicationRealmMonitor(object):
         # this flag is set
         self._check_and_apply_in_progress = False
 
-        # locks for proxy connections being handled currently
-        self._proxy_connection_locks = {}
-
     @property
     def is_started(self):
         """
@@ -341,18 +338,6 @@ class ApplicationRealmMonitor(object):
             # we will name the connection on our proxy worker along the target node/worker
             connection_id = 'cnc_{}_{}'.format(node_authid, worker_name)
 
-            # check if a connection with the respective name is already running
-            lock_key = (wc_node_oid, wc_worker_id, connection_id)
-            if lock_key in self._proxy_connection_locks:
-                self.log.info(
-                    '{func} Proxy connection {connection_id} already being handled by another placement - skipping {placement}',
-                    func=hltype(self._apply_webcluster_connections),
-                    connection_id=hlid(connection_id),
-                    placement=self._proxy_connection_locks[lock_key])
-                continue
-
-            self._proxy_connection_locks[lock_key] = placement
-
             try:
                 connection = yield self._manager._session.call(
                     'crossbarfabriccenter.remote.proxy.get_proxy_connection', str(wc_node_oid), wc_worker_id,
@@ -367,7 +352,6 @@ class ApplicationRealmMonitor(object):
                         wc_worker_id=hlid(wc_worker_id),
                         wc_node_oid=hlid(wc_node_oid),
                         error=e.error)
-                    del self._proxy_connection_locks[lock_key]
                     raise
                 is_running_completely = False
                 connection = None
@@ -611,7 +595,6 @@ class ApplicationRealmMonitor(object):
                             wc_worker_id=hlid(wc_worker_id),
                             wc_node_oid=hlid(wc_node_oid),
                             error=e.error)
-                        del self._proxy_connection_locks[lock_key]
                         raise
                     is_running_completely = False
                     if e.error == 'wamp.error.no_such_procedure':
@@ -668,7 +651,6 @@ class ApplicationRealmMonitor(object):
                             wc_worker_id=hlid(wc_worker_id),
                             num_routes=len(routes))
 
-            del self._proxy_connection_locks[lock_key]
         return is_running_completely
 
     @inlineCallbacks
@@ -737,11 +719,19 @@ class ApplicationRealmMonitor(object):
                 route = yield self._manager._session.call('crossbarfabriccenter.remote.proxy.start_proxy_realm_route',
                                                           str(wc_node_oid), wc_worker_id, realm_name, config)
             except Exception as e:
-                self.log.error('Proxy route failed: {e}', e=e)
+                self.log.error(
+                    '{func} Proxy route creation FAILED for node={node_oid} worker={worker_id} realm="{realm}": {error}',
+                    func=hltype(self._apply_webcluster_routes),
+                    node_oid=hlid(str(wc_node_oid)),
+                    worker_id=hlid(wc_worker_id),
+                    realm=hlval(realm_name),
+                    error=e)
             else:
                 self.log.info(
-                    '{func} Proxy backend route started:\n{route}',
+                    '{func} Proxy backend route started on node={node_oid} worker={worker_id}:\n{route}',
                     func=hltype(self._apply_webcluster_routes),
+                    node_oid=hlid(str(wc_node_oid)),
+                    worker_id=hlid(wc_worker_id),
                     route=route,
                 )
                 routes.append(route)
