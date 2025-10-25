@@ -93,10 +93,28 @@ class ApplicationRealmMonitor(object):
         """
         assert self._loop is None
 
-        self._loop = LoopingCall(self._check_and_apply)
+        def _check_and_apply_wrapper():
+            """Wrapper to add errback for error handling"""
+            d = self._check_and_apply()
+            d.addErrback(self._handle_check_and_apply_error)
+            return d
+
+        self._loop = LoopingCall(_check_and_apply_wrapper)
         self._loop.start(self._interval, now=False)
         # Schedule first start a bit after router monitor to speed up initial startup
         reactor.callLater(self._interval / 3.0, self._loop)
+
+    def _handle_check_and_apply_error(self, failure):
+        """
+        Handle any unhandled errors from _check_and_apply to ensure the flag is reset.
+        """
+        self.log.failure(
+            '{func} Unhandled error in check & apply for application realm {arealm_oid} - will retry in next iteration',
+            func=hltype(self._check_and_apply),
+            arealm_oid=hlid(self._arealm_oid),
+            failure=failure)
+        # Always reset the flag so next iteration can run
+        self._check_and_apply_in_progress = False
 
     def stop(self):
         """
@@ -458,6 +476,33 @@ class ApplicationRealmMonitor(object):
                         connection_id=hlid(connection_id),
                         state=connection_state)
 
+            # Check if connection port matches placement port
+            # If transport was restarted and got a new port, we need to restart the connection
+            if connection and tcp_listening_port:
+                current_port = connection.get('config', {}).get('transport', {}).get('endpoint', {}).get('port')
+                if current_port != tcp_listening_port:
+                    self.log.warn(
+                        '{func} Proxy connection {connection_id} port mismatch: current={current_port}, expected={expected_port} - will restart connection',
+                        func=hltype(self._apply_webcluster_connections),
+                        connection_id=hlid(connection_id),
+                        current_port=current_port,
+                        expected_port=tcp_listening_port)
+                    # Stop the old connection
+                    try:
+                        yield self._manager._session.call('crossbarfabriccenter.remote.proxy.stop_proxy_connection',
+                                                          str(wc_node_oid), wc_worker_id, connection_id)
+                        self.log.info('{func} Stopped proxy connection {connection_id} with stale port',
+                                      func=hltype(self._apply_webcluster_connections),
+                                      connection_id=hlid(connection_id))
+                        connection = None
+                    except Exception as e:
+                        self.log.error(
+                            '{func} Failed to stop proxy connection {connection_id} with stale port: {error}',
+                            func=hltype(self._apply_webcluster_connections),
+                            connection_id=hlid(connection_id),
+                            error=str(e))
+                        is_running_completely = False
+
             # if no connection is running, and if the target placement has a TCP port configured,
             # start a new connection on the proxy worker
             #
@@ -782,9 +827,26 @@ class ApplicationRealmMonitor(object):
                             'crossbarfabriccenter.remote.router.get_router_realm', str(node_oid), worker_name,
                             runtime_realm_id)
                     except ApplicationError as e:
-                        if e.error != 'crossbar.error.no_such_object':
-                            # anything but "no_such_object" is unexpected (and fatal)
-                            raise
+                        if e.error == 'wamp.error.no_such_procedure':
+                            # Worker exists but hasn't registered procedures yet (still starting up)
+                            # This is expected during worker startup - skip and retry in next iteration
+                            self.log.info(
+                                '{func} Worker {worker_name} on node {node_oid} not fully initialized yet - skipping realm setup, will retry in next iteration',
+                                func=hltype(self._apply_routercluster_placements),
+                                worker_name=hlid(worker_name),
+                                node_oid=hlid(node_oid))
+                            is_running_completely = False
+                            continue
+                        elif e.error != 'crossbar.error.no_such_object':
+                            # anything but "no_such_object" or "no_such_procedure" is unexpected
+                            self.log.error(
+                                '{func} Unexpected error calling get_router_realm on worker {worker_name}: {error}',
+                                func=hltype(self._apply_routercluster_placements),
+                                worker_name=hlid(worker_name),
+                                error=e.error)
+                            is_running_completely = False
+                            continue
+                        # If we get here, it's "no_such_object" - realm doesn't exist yet, proceed to create it
                         self.log.info(
                             '{func} No application realm {runtime_realm_id} currently running for router cluster worker {worker_name}: starting application realm ..',
                             func=hltype(self._apply_routercluster_placements),

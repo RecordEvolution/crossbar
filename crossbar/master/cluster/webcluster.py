@@ -65,10 +65,28 @@ class WebClusterMonitor(object):
         """
         assert self._loop is None
 
-        self._loop = LoopingCall(self._check_and_apply)
+        def _check_and_apply_wrapper():
+            """Wrapper to add errback for error handling"""
+            d = self._check_and_apply()
+            d.addErrback(self._handle_check_and_apply_error)
+            return d
+
+        self._loop = LoopingCall(_check_and_apply_wrapper)
         self._loop.start(self._interval, now=False)
         # Schedule first start a bit after arealm monitor to speed up initial startup
         _reactor.callLater(self._interval * 2 / 3.0, self._loop)
+
+    def _handle_check_and_apply_error(self, failure):
+        """
+        Handle any unhandled errors from _check_and_apply to ensure the flag is reset.
+        """
+        self.log.failure(
+            '{func} Unhandled error in check & apply for webcluster {webcluster} - will retry in next iteration',
+            func=hltype(self._check_and_apply),
+            webcluster=hlid(self._webcluster_oid),
+            failure=failure)
+        # Always reset the flag so next iteration can run
+        self._check_and_apply_in_progress = False
 
     def stop(self):
         """
