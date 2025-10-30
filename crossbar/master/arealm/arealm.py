@@ -325,6 +325,8 @@ class ApplicationRealmMonitor(object):
         # for each placement on the given (wc_node_oid, wc_worker_id) webcluster worker, we need to setup:
         #   - a connection and
         #   - routes
+        proxy_connection_locks = {}
+        
         for placement in workergroup_placements:
 
             # the router worker this placement targets
@@ -337,6 +339,18 @@ class ApplicationRealmMonitor(object):
 
             # we will name the connection on our proxy worker along the target node/worker
             connection_id = 'cnc_{}_{}'.format(node_authid, worker_name)
+
+            # check if a connection with the respective name is already running
+            lock_key = (wc_node_oid, wc_worker_id, connection_id)
+            if lock_key in proxy_connection_locks:
+                self.log.info(
+                    '{func} Proxy connection {connection_id} already being handled by another placement - skipping {placement}',
+                    func=hltype(self._apply_webcluster_connections),
+                    connection_id=hlid(connection_id),
+                    placement=proxy_connection_locks[lock_key])
+                continue
+
+            proxy_connection_locks[lock_key] = placement
 
             try:
                 connection = yield self._manager._session.call(
@@ -352,6 +366,7 @@ class ApplicationRealmMonitor(object):
                         wc_worker_id=hlid(wc_worker_id),
                         wc_node_oid=hlid(wc_node_oid),
                         error=e.error)
+                    del proxy_connection_locks[lock_key]
                     raise
                 is_running_completely = False
                 connection = None
@@ -548,7 +563,18 @@ class ApplicationRealmMonitor(object):
                         connection = yield self._manager._session.call(
                             'crossbarfabriccenter.remote.proxy.get_proxy_connection', str(wc_node_oid), wc_worker_id,
                             connection_id)
+                    elif e.error == 'wamp.error.no_such_procedure':
+                        # Worker not ready yet - this is a transient error that will resolve on retry
+                        self.log.info(
+                            '{func} Proxy worker {wc_worker_id} on node {wc_node_oid} not ready yet to start connection {connection_id} (will retry) ..',
+                            func=hltype(self._apply_webcluster_connections),
+                            wc_node_oid=hlid(wc_node_oid),
+                            wc_worker_id=hlid(wc_worker_id),
+                            connection_id=hlid(connection_id))
+                        is_running_completely = False
+                        connection = None
                     else:
+                        # Unexpected error - log and raise
                         self.log.warn(
                             '{func} Failed to start proxy backend connection {connection_id} on worker {wc_worker_id} (node {wc_node_oid}): {error}',
                             func=hltype(self._apply_webcluster_connections),
@@ -557,7 +583,7 @@ class ApplicationRealmMonitor(object):
                             wc_node_oid=hlid(wc_node_oid),
                             error=e.error)
                         is_running_completely = False
-                        raise
+                        connection = None
 
             # if by now we do have a connection on the proxy worker, setup all routes (for the arealm)
             # using the connection
@@ -595,6 +621,7 @@ class ApplicationRealmMonitor(object):
                             wc_worker_id=hlid(wc_worker_id),
                             wc_node_oid=hlid(wc_node_oid),
                             error=e.error)
+                        del proxy_connection_locks[lock_key]
                         raise
                     is_running_completely = False
                     if e.error == 'wamp.error.no_such_procedure':
@@ -651,6 +678,7 @@ class ApplicationRealmMonitor(object):
                             wc_worker_id=hlid(wc_worker_id),
                             num_routes=len(routes))
 
+            del proxy_connection_locks[lock_key]
         return is_running_completely
 
     @inlineCallbacks
