@@ -927,6 +927,14 @@ class MrealmController(ApplicationSession):
         self.log.debug('{func}: completed!', func=hltype(self._on_node_shutdown))
 
     async def _on_session_startup(self, session, details: Optional[CallDetails] = None):
+        # Debug logging to see what we receive
+        self.log.debug(
+            '{func} Received session join event: session={session}, authrole={authrole}, authid={authid}',
+            func=hltype(self._on_session_startup),
+            session=session.get('session'),
+            authrole=hlval(session.get('authrole')),
+            authid=hlval(session.get('authid')))
+        
         if session.get('authrole') == 'node':
             session_id = session.get('session')
             node_authid = session.get('authid')
@@ -937,6 +945,9 @@ class MrealmController(ApplicationSession):
 
             # currently, nodes are indexed by str-type UUID in the run-time map
             node_oid = str(node_oid)
+
+            # Note: cluster_ip is now updated in the authenticator during authentication,
+            # before the session joins. No need to update it here.
 
             # create run-time representation of node
             if node_oid not in self._nodes:

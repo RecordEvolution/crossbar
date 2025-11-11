@@ -473,7 +473,10 @@ class Dealer(object):
             if authorization['allow']:
                 registration = self._registration_map.get_observation(register.procedure, register.match)
                 if register.force_reregister and registration:
-                    for obs in registration.observers:
+                    # Kick out all other observers, but not the session doing the re-registration
+                    observers_to_kick = [obs for obs in registration.observers if obs != session]
+                    
+                    for obs in observers_to_kick:
                         self._registration_map.drop_observer(obs, registration)
                         kicked = message.Unregistered(
                             0,
@@ -485,7 +488,11 @@ class Dealer(object):
                         kicked.correlation_is_anchor = False
                         kicked.correlation_is_last = False
                         self._router.send(obs, kicked)
-                    self._registration_map.delete_observation(registration)
+                    
+                    # If we kicked out all observers (i.e., session wasn't previously registered),
+                    # delete the observation so it can be recreated
+                    if observers_to_kick and len(registration.observers) == len(observers_to_kick):
+                        self._registration_map.delete_observation(registration)
 
                 # ok, session authorized to register. now get the registration
                 #

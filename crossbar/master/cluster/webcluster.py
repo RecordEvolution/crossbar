@@ -26,7 +26,7 @@ import txaio
 
 txaio.use_twisted()
 from txaio import time_ns, sleep, make_logger  # noqa
-from twisted.internet.defer import inlineCallbacks, TimeoutError
+from twisted.internet.defer import inlineCallbacks, TimeoutError, CancelledError
 from twisted.internet.task import LoopingCall
 from twisted.internet import reactor as _reactor
 
@@ -177,8 +177,17 @@ class WebClusterMonitor(object):
                         # worker run-time information (obtained by calling into the live node)
                         worker = None
                         try:
-                            worker = yield self._manager._session.call('crossbarfabriccenter.remote.node.get_worker',
+                            get_worker_d = self._manager._session.call('crossbarfabriccenter.remote.node.get_worker',
                                                                        node_oid, worker_id)
+                            get_worker_d.addTimeout(30, _reactor)
+                            worker = yield get_worker_d
+                        except (TimeoutError, CancelledError):
+                            self.log.warn(
+                                '{func} Timeout checking worker {worker_id} on node {node_oid} - node may not be ready yet',
+                                func=hltype(self._check_and_apply),
+                                node_oid=hlid(node_oid),
+                                worker_id=hlid(worker_id))
+                            worker = None
                         except ApplicationError as e:
                             if e.error != 'crossbar.error.no_such_worker':
                                 # anything but "no_such_worker" is unexpected (and fatal)
@@ -199,11 +208,16 @@ class WebClusterMonitor(object):
                         if not worker:
                             worker_options = None
                             try:
-                                worker_started = yield self._manager._session.call(
+                                start_worker_d = self._manager._session.call(
                                     'crossbarfabriccenter.remote.node.start_worker', node_oid, worker_id, 'proxy',
                                     worker_options)
-                                worker = yield self._manager._session.call(
+                                start_worker_d.addTimeout(30, _reactor)
+                                worker_started = yield start_worker_d
+                                
+                                get_worker_d = self._manager._session.call(
                                     'crossbarfabriccenter.remote.node.get_worker', node_oid, worker_id)
+                                get_worker_d.addTimeout(30, _reactor)
+                                worker = yield get_worker_d
                                 
                                 self.log.info(
                                     '{func} Web cluster worker {worker_id} started on node {node_oid} [{worker_started}]',
@@ -211,6 +225,13 @@ class WebClusterMonitor(object):
                                     node_oid=hlid(node_oid),
                                     worker_id=hlid(worker_id),
                                     worker_started=worker_started)
+                            except (TimeoutError, CancelledError):
+                                self.log.warn(
+                                    '{func} Timeout starting or verifying worker {worker_id} on node {node_oid} - node may not be ready yet, will retry',
+                                    func=hltype(self._check_and_apply),
+                                    node_oid=hlid(node_oid),
+                                    worker_id=hlid(worker_id))
+                                is_running_completely = False
                             except:
                                 self.log.failure()
                                 is_running_completely = False
@@ -222,9 +243,19 @@ class WebClusterMonitor(object):
                             # FIXME: currently, we only have 1 transport on a web cluster worker (which is named "primary")
                             transport_id = 'primary'
                             try:
-                                transport = yield self._manager._session.call(
+                                get_transport_d = self._manager._session.call(
                                     'crossbarfabriccenter.remote.proxy.get_proxy_transport', node_oid, worker_id,
                                     transport_id)
+                                get_transport_d.addTimeout(30, _reactor)
+                                transport = yield get_transport_d
+                            except (TimeoutError, CancelledError):
+                                self.log.warn(
+                                    '{func} Timeout checking transport {transport_id} for worker {worker_id} on node {node_oid} - worker may not be ready yet',
+                                    func=hltype(self._check_and_apply),
+                                    worker_id=hlid(worker_id),
+                                    transport_id=hlid(transport_id),
+                                    node_oid=hlid(node_oid))
+                                transport = None
                             except ApplicationError as e:
                                 if e.error != 'crossbar.error.no_such_object':
                                     # anything but "no_such_object" is unexpected (and fatal)
@@ -270,18 +301,32 @@ class WebClusterMonitor(object):
                                     transport_config['options']['client_timeout'] = webcluster.http_client_timeout
 
                                 try:
-                                    transport_started = yield self._manager._session.call(
+                                    start_transport_d = self._manager._session.call(
                                         'crossbarfabriccenter.remote.proxy.start_proxy_transport', node_oid, worker_id,
                                         transport_id, transport_config)
-                                    transport = yield self._manager._session.call(
+                                    start_transport_d.addTimeout(30, _reactor)
+                                    transport_started = yield start_transport_d
+                                    
+                                    get_transport_d = self._manager._session.call(
                                         'crossbarfabriccenter.remote.proxy.get_proxy_transport', node_oid, worker_id,
                                         transport_id)
+                                    get_transport_d.addTimeout(30, _reactor)
+                                    transport = yield get_transport_d
+                                    
                                     self.log.info(
                                         '{func} Transport {transport_id} started on Web cluster worker {worker_id} [{transport_started}]',
                                         func=hltype(self._check_and_apply),
                                         worker_id=hlid(worker_id),
                                         transport_id=hlid(transport_id),
                                         transport_started=transport_started)
+                                except (TimeoutError, CancelledError):
+                                    self.log.warn(
+                                        '{func} Timeout starting or verifying transport {transport_id} for worker {worker_id} on node {node_oid} - worker may not be ready yet, will retry',
+                                        func=hltype(self._check_and_apply),
+                                        worker_id=hlid(worker_id),
+                                        transport_id=hlid(transport_id),
+                                        node_oid=hlid(node_oid))
+                                    is_running_completely = False
                                 except:
                                     self.log.failure()
                                     is_running_completely = False
@@ -305,9 +350,24 @@ class WebClusterMonitor(object):
                                 for path, webservice in webservices.items():
                                     service = None
                                     try:
-                                        service = yield self._manager._session.call(
+                                        get_service_d = self._manager._session.call(
                                             'crossbarfabriccenter.remote.proxy.get_web_transport_service', node_oid,
                                             worker_id, transport_id, path)
+                                        
+                                        # Add client-side timeout to prevent monitor from hanging
+                                        get_service_d.addTimeout(30, _reactor)
+                                        
+                                        service = yield get_service_d
+                                    except (TimeoutError, CancelledError):
+                                        # Client-side timeout - proxy worker not responding when checking service status
+                                        self.log.warn(
+                                            '{func} Timeout checking web service status on path "{path}" for worker {worker_id} (node {node_oid}) - worker may not be ready yet, will assume service not running',
+                                            func=hltype(self._check_and_apply),
+                                            path=hlval(path),
+                                            worker_id=hlid(worker_id),
+                                            node_oid=hlid(node_oid))
+                                        # Treat timeout same as service not running - will try to start it
+                                        service = None
                                     except ApplicationError as e:
                                         # anything but "not_running" is unexpected (and fatal)
                                         if e.error != 'crossbar.error.not_running':
@@ -353,7 +413,7 @@ class WebClusterMonitor(object):
                                                 transport_id=hlid(transport_id),
                                                 path=hlval(path),
                                                 webservice_started=webservice_started)
-                                        except TimeoutError:
+                                        except (TimeoutError, CancelledError):
                                             # Client-side timeout - proxy worker not responding
                                             self.log.warn(
                                                 '{func} Timeout starting web service on path "{path}" for worker {worker_id} (node {node_oid}) - worker may not be ready yet, will retry',

@@ -77,6 +77,23 @@ class NodeManagementSession(ApplicationSession):
             'channel_binding': 'tls-unique'
         }
 
+        # Include node's current cluster IP (from environment variable, with fallback to localhost)
+        # This allows the master to update the database with the current IP when the node connects
+        import os
+        cluster_ip = os.environ.get('CROSSBAR_NODE_CLUSTER_IP', '').strip()
+        
+        if not cluster_ip:
+            # Fallback to localhost (consistent with key generation behavior)
+            cluster_ip = '127.0.0.1'
+            self.log.debug('{klass}.onConnect(): using fallback cluster_ip={cluster_ip}',
+                          klass=self.__class__.__name__,
+                          cluster_ip=cluster_ip)
+        
+        extra['cluster_ip'] = cluster_ip
+        self.log.info('{klass}.onConnect(): sending cluster_ip={cluster_ip} in authextra',
+                      klass=self.__class__.__name__,
+                      cluster_ip=cluster_ip)
+
         # now request to join. the authrole==node is mandatory. the actual realm
         # we're joined to is decided by Crossbar.io Master, and hence we
         # must not provide that. Same holds for authid (also auto-assigned).

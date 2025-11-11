@@ -18,7 +18,7 @@ from datetime import datetime
 
 import zlmdb
 
-from crossbar._util import hl, hlid, hltype
+from crossbar._util import hl, hlid, hltype, hlval
 from cfxdb.globalschema import GlobalSchema
 from cfxdb.user import User, UserRole
 from cfxdb.user import ActivationType, ActivationStatus, ActivationToken
@@ -327,7 +327,7 @@ class Authenticator(ApplicationSession):
 
                 # a node is authenticated based on the pubkey only, and realm/authid/authrole/..
                 # are set from the configuration stored in controller database purely
-                auth = self._auth_node(pubkey)
+                auth = self._auth_node(pubkey, details)
                 return auth
 
             else:
@@ -342,7 +342,7 @@ class Authenticator(ApplicationSession):
         # safeguard: should not arrive here
         raise Exception('logic error')
 
-    def _auth_node(self, pubkey):
+    def _auth_node(self, pubkey, details):
         """
         Authenticate a Crossbar.io node.
 
@@ -351,6 +351,13 @@ class Authenticator(ApplicationSession):
         of a node is automatically assigned by Crossbar.io).
         """
         self.log.debug('authenticating node with pubkey={pubkey}', pubkey=pubkey)
+
+        # Extract cluster_ip from incoming authextra if provided
+        incoming_cluster_ip = None
+        if details and 'authextra' in details and 'cluster_ip' in details['authextra']:
+            incoming_cluster_ip = details['authextra']['cluster_ip']
+            self.log.info('Node authentication received cluster_ip={cluster_ip} from node',
+                         cluster_ip=hlval(incoming_cluster_ip))
 
         # lookup the node by its public key (in hex)
         node = None
@@ -362,6 +369,31 @@ class Authenticator(ApplicationSession):
         if node and node.mrealm_oid:
             if node.mrealm_oid not in self._connected_nodes:
                 self._connected_nodes[node.mrealm_oid] = {}
+
+            # Update cluster_ip in database if node sent a different IP than what's stored
+            # This handles cases where pods are rescheduled and get new IP addresses
+            if incoming_cluster_ip and incoming_cluster_ip != node.cluster_ip:
+                self.log.info(
+                    'Node {authid} cluster IP changed from {old_ip} to {new_ip} - updating database during authentication',
+                    authid=hlid(node.authid),
+                    old_ip=hlval(node.cluster_ip) if node.cluster_ip else 'None',
+                    new_ip=hlval(incoming_cluster_ip))
+                
+                with self._db.begin(write=True) as txn:
+                    node_db = self._schema.nodes[txn, node_oid]
+                    if node_db:
+                        node_db.cluster_ip = incoming_cluster_ip
+                        self._schema.nodes[txn, node_oid] = node_db
+                        
+                        # Also update authextra to keep it in sync
+                        if node_db.authextra:
+                            node_db.authextra['cluster_ip'] = incoming_cluster_ip
+                        else:
+                            node_db.authextra = {'cluster_ip': incoming_cluster_ip}
+                        self._schema.nodes[txn, node_oid] = node_db
+                        
+                        # Update our local node object
+                        node = node_db
 
             # for nodes, realm + authid MUST be configured, and authextra MAY be configured
             # note that a authenticating node MUST NOT override the configured values for

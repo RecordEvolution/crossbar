@@ -348,8 +348,8 @@ class DomainController(ApplicationSession):
                                                 node_key_tags = _parse_node_key(node_key_file)
                                                 node_key_hex = node_key_tags['public-key-ed25519']
                                                 node_id = node_key_tags.get('node-authid', None)
-                                                cluster_ip = node_key_tags.get('node-cluster-ip', None)
-                                                pubkeys.append((r, node_key_hex, node_id, cluster_ip))
+                                                # cluster_ip is NOT read from key file - will be set when node connects
+                                                pubkeys.append((r, node_key_hex, node_id))
 
                             self.log.debug(
                                 '{klass}::watch_and_pair: found {cnt} directories (matching), with {cntk} node keys scanned ..',
@@ -361,10 +361,10 @@ class DomainController(ApplicationSession):
                                 # determine actually new pubkeys
                                 new_pubkeys = []
                                 with self.db.begin() as txn:
-                                    for cbdir, pubkey, node_id, cluster_ip in pubkeys:
+                                    for cbdir, pubkey, node_id in pubkeys:
                                         node_oid = self.schema.idx_nodes_by_pubkey[txn, pubkey]
                                         if not node_oid:
-                                            new_pubkeys.append((cbdir, pubkey, node_id, cluster_ip))
+                                            new_pubkeys.append((cbdir, pubkey, node_id))
                                         else:
                                             node = self.schema.nodes[txn, node_oid]
                                             self.log.debug(
@@ -383,11 +383,12 @@ class DomainController(ApplicationSession):
                                     klass=self.__class__.__name__)
 
                                 # store all new pubkeys
-                                for cbdir, pubkey, node_id, cluster_ip in new_pubkeys:
+                                for cbdir, pubkey, node_id in new_pubkeys:
                                     node = Node()
                                     node.oid = uuid.uuid4()
                                     node.pubkey = pubkey
-                                    node.cluster_ip = cluster_ip
+                                    # cluster_ip will be None initially, set when node connects and sends it in authextra
+                                    node.cluster_ip = None
 
                                     # auto-pair newly discovered node to the default management realm, and owned by superuser
                                     node.owner_oid = self._superuser_oid
@@ -398,7 +399,6 @@ class DomainController(ApplicationSession):
                                         node.authid = 'node-{}'.format(str(node.oid)[:8])
                                     node.authextra = {
                                         'node_oid': str(node.oid),
-                                        'cluster_ip': cluster_ip,
                                         'mrealm_oid': str(node.mrealm_oid),
                                     }
 
@@ -425,7 +425,6 @@ class DomainController(ApplicationSession):
                                                 ('management-realm', 'default'),
                                                 ('management-realm-oid', str(node.mrealm_oid)),
                                                 ('node-oid', str(node.oid)),
-                                                ('node-cluster-ip', node.cluster_ip),
                                                 ('node-authid', str(node.authid)),
                                                 ('activation-code', activation_code),
                                                 ('public-key-ed25519', pubkey),

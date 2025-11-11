@@ -233,7 +233,6 @@ def _maybe_generate_node_key(cbdir, privfile='key.priv', pubfile='key.pub'):
                 ('created-at', priv_tags['created-at']),
                 ('machine-id', priv_tags['machine-id']),
                 ('node-authid', priv_tags.get('node-authid', None)),
-                ('node-cluster-ip', priv_tags.get('node-cluster-ip', None)),
                 ('public-key-ed25519', pubkey_hex),
                 ('public-adr-eth', eth_pubadr),
             ])
@@ -267,22 +266,12 @@ def _maybe_generate_node_key(cbdir, privfile='key.priv', pubfile='key.pub'):
             node_authid = socket.gethostname()
             log.info('using node_authid from hostname: "{node_authid}"', node_authid=node_authid)
 
-        if 'CROSSBAR_NODE_CLUSTER_IP' in os.environ and os.environ['CROSSBAR_NODE_CLUSTER_IP'].strip() != '':
-            node_cluster_ip = os.environ['CROSSBAR_NODE_CLUSTER_IP']
-            log.info('using node_cluster_ip from environment variable CROSSBAR_NODE_CLUSTER_IP: "{node_cluster_ip}"',
-                     node_cluster_ip=node_cluster_ip)
-        else:
-            node_cluster_ip = '127.0.0.1'
-            log.info('using node_cluster_ip for localhost (builtin): "{node_cluster_ip}"',
-                     node_cluster_ip=node_cluster_ip)
-
         # first, write the public file
         tags = OrderedDict([
             ('creator', _creator()),
             ('created-at', utcnow()),
             ('machine-id', _machine_id()),
             ('node-authid', node_authid),
-            ('node-cluster-ip', node_cluster_ip),
             ('public-key-ed25519', pubkey_hex),
             ('public-adr-eth', eth_pubadr),
         ])
